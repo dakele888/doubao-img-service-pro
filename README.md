@@ -273,6 +273,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1   # 编译 + 输出到 dist\
 | 想看详细日志 | exe 同目录的 `service.log`（超过 1MB 自动轮转为 `service.old.log`） |
 | 窗口里一片空白 | WebView2 没初始化成功，看 `service.log`；多半是系统没装 WebView2 运行时（Win10/11 一般都有） |
 | 提示面板没能自动打开 | 系统缺 WebView2 运行时，程序已退回浏览器窗口并给了地址 |
+| 参考图没被认出来 | 看 `service.log` 里的 `[请求]` 几行：会写清楚请求多大、什么 content-type、每个上传 part 叫什么名、多大；如果是 JSON 还会写字段结构（`image=string(1234)` 这样）。对照着看就知道调用方怎么传的 |
 
 ## 限制
 
