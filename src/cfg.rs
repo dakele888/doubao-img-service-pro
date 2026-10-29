@@ -22,6 +22,8 @@ pub struct Config {
     pub image_tier: String,
     /// 视频中转专用会话名（和生图分开，避免图片/视频混在一个对话里）
     pub video_conversation_name: String,
+    /// 视频中转专用会话地址（跟生图分开存）
+    pub video_conversation_url: String,
 }
 
 impl Default for Config {
@@ -39,6 +41,7 @@ impl Default for Config {
             require_password: true,
             image_tier: "ori".into(),
             video_conversation_name: "视频专用".into(),
+            video_conversation_url: String::new(),
         }
     }
 }
@@ -77,6 +80,7 @@ impl Config {
                 })
                 .unwrap_or_else(|| d.image_tier.clone()),
             video_conversation_name: s("videoConversationName", &d.video_conversation_name),
+            video_conversation_url: s("videoConversationUrl", &d.video_conversation_url),
         }
     }
 
@@ -94,6 +98,7 @@ impl Config {
             "requirePassword": self.require_password,
             "imageTier": self.image_tier,
             "videoConversationName": self.video_conversation_name,
+            "videoConversationUrl": self.video_conversation_url,
             // 派生字段：给回滚到旧版时保持语义（raw=无水印）
             "rawImage": self.image_tier == "raw",
         })

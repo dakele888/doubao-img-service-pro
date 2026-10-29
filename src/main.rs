@@ -550,6 +550,9 @@ fn route(stream: &mut TcpStream, req: Req) {
             let t = x.trim();
             cfg.video_conversation_name = if t.is_empty() { "视频专用".into() } else { t.chars().take(40).collect() };
         }
+        if let Some(x) = v.get("videoConversationUrl").and_then(|x| x.as_str()) {
+            cfg.video_conversation_url = x.trim().chars().take(300).collect();
+        }
         cfg.save(&config_file());
         let od = out_dir(&cfg);
         let _ = std::fs::create_dir_all(&od);
@@ -719,6 +722,7 @@ fn route(stream: &mut TcpStream, req: Req) {
     }
 
     if m == "GET" && p == "/api/video/status" {
+        let cfg = Config::load(&config_file());
         return json_resp(
             stream,
             200,
@@ -729,6 +733,8 @@ fn route(stream: &mut TcpStream, req: Req) {
                 "endpoint": format!("http://{}:{}/v1", HOST, port()),
                 // 仅供说明用，不要填到 Base URL 里
                 "videosEndpoint": format!("http://{}:{}/v1/videos", HOST, port()),
+                "conversationName": cfg.video_conversation_name,
+                "conversationUrl": cfg.video_conversation_url,
             }),
         );
     }
@@ -1295,11 +1301,11 @@ fn produce_video(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failu
         }
     }
 
-    // 回写视频会话地址，方便排查
+    // 回写视频会话地址（存到 video_conversation_url，不能污染生图的 conversation_url）
     let mut cur = Config::load(&config_file());
     if let Some(cu) = v.get("convUrl").and_then(|x| x.as_str()) {
-        if cu.contains("/chat/") && cur.conversation_url != cu {
-            cur.conversation_url = cu.to_string();
+        if cu.contains("/chat/") && cur.video_conversation_url != cu {
+            cur.video_conversation_url = cu.to_string();
             cur.save(&config_file());
         }
     }
