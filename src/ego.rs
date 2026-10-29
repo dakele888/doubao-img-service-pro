@@ -78,14 +78,28 @@ pub fn build_video_script(
 
 const TPL: &str = r##"
 // 空间归属可能被 ego 判给用户（调试/手动操作后会这样），拿不到就按错误里的 id 接管回来
+// 拿不到原来的空间就新建一个：归属被判定为用户、或被人工接管导致自动化被暂停，
+// 都直接用新空间继续跑（ego 的登录态是账号级的，新空间一样能访问已登录的豆包）。
 const task = await (async () => {
   try { return await taskSpace("@@SPACE@@"); }
   catch (e) {
-    const m = String((e && e.message) || e).match(/belongs to the user \(id (\d+)\)/);
-    if (!m) throw e;
-    return await claimTaskSpace(Number(m[1]));
+    const msg = String((e && e.message) || e);
+    const m = msg.match(/belongs to the user \(id (\d+)\)/);
+    if (m) {
+      try { return await claimTaskSpace(Number(m[1])); } catch (e2) {}
+    }
+    const suffix = Date.now().toString(36).slice(-5);
+    return await taskSpace("@@SPACE@@" + "-" + suffix);
   }
 })();
+// 浏览器里点过「接管」会把控制权交给用户，此时任何浏览器命令都会被暂停。
+// 自动化必须独占，所以直接拿回来（用户在手动操作的话，服务跑任务时会短暂抢一下控制权）。
+try { await task.tabs(); }
+catch (e) {
+  if (/Control of this task space is with the user/.test(String((e && e.message) || e))) {
+    try { await takeOverTaskSpace(task.spaceId); } catch (e2) {}
+  }
+}
 // 接口返回的图片档位："ori"=网页「下载原图」同档（带水印）、"raw"=无水印原图、"thumb"=列表缩略图
 const WANT_TIER = "@@TIER@@";
 const PROMPT = @@PROMPT@@;
@@ -529,14 +543,28 @@ if (__needLogin) {
 // 豆包的视频地址藏在页面 video 元素和接口响应里，抓法比图片宽一些。
 const VIDEO_TPL: &str = r##"
 // 空间归属可能被 ego 判给用户（调试/手动操作后会这样），拿不到就按错误里的 id 接管回来
+// 拿不到原来的空间就新建一个：归属被判定为用户、或被人工接管导致自动化被暂停，
+// 都直接用新空间继续跑（ego 的登录态是账号级的，新空间一样能访问已登录的豆包）。
 const task = await (async () => {
   try { return await taskSpace("@@SPACE@@"); }
   catch (e) {
-    const m = String((e && e.message) || e).match(/belongs to the user \(id (\d+)\)/);
-    if (!m) throw e;
-    return await claimTaskSpace(Number(m[1]));
+    const msg = String((e && e.message) || e);
+    const m = msg.match(/belongs to the user \(id (\d+)\)/);
+    if (m) {
+      try { return await claimTaskSpace(Number(m[1])); } catch (e2) {}
+    }
+    const suffix = Date.now().toString(36).slice(-5);
+    return await taskSpace("@@SPACE@@" + "-" + suffix);
   }
 })();
+// 浏览器里点过「接管」会把控制权交给用户，此时任何浏览器命令都会被暂停。
+// 自动化必须独占，所以直接拿回来（用户在手动操作的话，服务跑任务时会短暂抢一下控制权）。
+try { await task.tabs(); }
+catch (e) {
+  if (/Control of this task space is with the user/.test(String((e && e.message) || e))) {
+    try { await takeOverTaskSpace(task.spaceId); } catch (e2) {}
+  }
+}
 const PROMPT = @@PROMPT@@;
 const PAGE_LABEL = @@PAGE@@;
 const CONV_NAME = @@NAME@@;
