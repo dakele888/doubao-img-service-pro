@@ -21,7 +21,18 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
-pub const PORT: u16 = 8788;
+pub const PORT_DEFAULT: u16 = 8788;
+static PORT_V: OnceLock<u16> = OnceLock::new();
+
+/// 默认 8788，可用环境变量 DOUBAO_PORT 覆盖
+pub fn port() -> u16 {
+    *PORT_V.get_or_init(|| {
+        std::env::var("DOUBAO_PORT")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(PORT_DEFAULT)
+    })
+}
 const HOST: &str = "127.0.0.1";
 const GEN_TIMEOUT_MS: u64 = 240_000;
 const MAX_QUEUE: usize = 30;
@@ -61,7 +72,7 @@ fn main() {
 
     util::log("========== 豆包生图服务启动 ==========");
 
-    let addr = format!("{}:{}", HOST, PORT);
+    let addr = format!("{}:{}", HOST, port());
 
     // 已经有实例在跑：让它把窗口提到前面，本进程直接退出
     if TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(600)).is_ok() {
@@ -72,15 +83,18 @@ fn main() {
 
     let cfg = Config::load(&config_file());
 
+    // 仅供自动化测试 / 无界面部署：设置了 DOUBAO_HEADLESS=1 就不弹验证窗、不建窗口
+    let headless = std::env::var("DOUBAO_HEADLESS").map(|v| v.trim() == "1").unwrap_or(false);
+
     // 免责声明每次都显示；启动密码可以在面板里关掉
-    if !auth::unlock(cfg.require_password) {
+    if !headless && !auth::unlock(cfg.require_password) {
         util::log("启动验证未通过，退出");
         return;
     }
 
     let od = out_dir(&cfg);
     let _ = std::fs::create_dir_all(&od);
-    util::log(&format!("界面：原生窗口 · 接口 http://{}:{}/", HOST, PORT));
+    util::log(&format!("界面：原生窗口 · 接口 http://{}:{}/", HOST, port()));
     util::log(&format!(
         "专用对话 {} · 缓存 {} · 直传 {}",
         cfg.conversation_name,
@@ -97,16 +111,22 @@ fn main() {
 
     // 服务常驻：面板可以关进托盘，不再按心跳自动退出
     thread::spawn(serve);
+    if headless {
+        util::log("无界面模式运行中（DOUBAO_HEADLESS=1）");
+        loop {
+            thread::sleep(Duration::from_secs(3600));
+        }
+    }
     webview::run();
     util::log("窗口已关闭，退出");
 }
 
 fn serve() {
-    let addr = format!("{}:{}", HOST, PORT);
+    let addr = format!("{}:{}", HOST, port());
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
-            util::log(&format!("端口 {} 绑定失败：{}", PORT, e));
+            util::log(&format!("端口 {} 绑定失败：{}", port(), e));
             return;
         }
     };
@@ -128,7 +148,7 @@ fn serve() {
 
 /// 启动第二个实例时，用它唤醒已有窗口
 fn poke(path: &str) {
-    if let Ok(mut s) = TcpStream::connect((HOST, PORT)) {
+    if let Ok(mut s) = TcpStream::connect((HOST, port())) {
         let _ = s.set_read_timeout(Some(Duration::from_millis(800)));
         let _ = s.write_all(format!("GET {} HTTP/1.0\r\nHost: {}\r\n\r\n", path, HOST).as_bytes());
         let mut buf = [0u8; 64];
@@ -153,7 +173,7 @@ extern "system" {
 /// 用 Chromium 的 --app 模式开一个无地址栏的独立窗口。
 /// 按 Edge → Chrome → 360 顺序试；哪个启动后立刻退出（说明被策略拦了）就换下一个。
 pub fn open_browser_window() {
-    let url = format!("http://{}:{}/", HOST, PORT);
+    let url = format!("http://{}:{}/", HOST, port());
     let profile = base_dir().join(".win");
     let _ = std::fs::create_dir_all(&profile);
 
@@ -194,14 +214,17 @@ pub fn open_browser_window() {
 }
 // ---------------- HTTP ----------------
 
+const MAX_BODY: usize = 64 * 1024 * 1024;
+
 struct Req {
     method: String,
     path: String,
     body: Vec<u8>,
+    ctype: String,
 }
 
 fn handle(mut stream: TcpStream) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
     let peer = stream.try_clone();
     let mut reader = match peer {
         Ok(s) => BufReader::new(s),
@@ -221,6 +244,9 @@ fn handle(mut stream: TcpStream) {
     let path = full.split('?').next().unwrap_or("/").to_string();
 
     let mut content_length = 0usize;
+    let mut ctype = String::new();
+    let mut chunked = false;
+    let mut expect_continue = false;
     loop {
         let mut h = String::new();
         if reader.read_line(&mut h).is_err() {
@@ -233,18 +259,73 @@ fn handle(mut stream: TcpStream) {
         let low = t.to_lowercase();
         if low.starts_with("content-length:") {
             content_length = low[15..].trim().parse().unwrap_or(0);
+        } else if low.starts_with("content-type:") {
+            ctype = t[13..].trim().to_string();
+        } else if low.starts_with("transfer-encoding:") && low.contains("chunked") {
+            chunked = true;
+        } else if low.starts_with("expect:") && low.contains("100-continue") {
+            expect_continue = true;
         }
     }
 
-    let mut body = vec![0u8; content_length.min(8 * 1024 * 1024)];
-    if content_length > 0 {
-        if reader.read_exact(&mut body).is_err() {
-            return;
-        }
+    // 有的客户端（Go / Python requests）传文件前会等一个 100 再发 body
+    if expect_continue {
+        let _ = stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+        let _ = stream.flush();
     }
 
-    let req = Req { method, path, body };
+    let body = if chunked {
+        read_chunked(&mut reader)
+    } else {
+        read_fixed(&mut reader, content_length)
+    };
+
+    let req = Req { method, path, body, ctype };
     route(&mut stream, req);
+}
+
+fn read_fixed(reader: &mut BufReader<TcpStream>, n: usize) -> Vec<u8> {
+    let mut left = n.min(MAX_BODY);
+    let mut body = Vec::with_capacity(left.min(4 * 1024 * 1024));
+    let mut buf = [0u8; 16384];
+    while left > 0 {
+        let want = left.min(buf.len());
+        match reader.read(&mut buf[..want]) {
+            Ok(0) => break,
+            Ok(k) => {
+                body.extend_from_slice(&buf[..k]);
+                left -= k;
+            }
+            Err(_) => break,
+        }
+    }
+    body
+}
+
+fn read_chunked(reader: &mut BufReader<TcpStream>) -> Vec<u8> {
+    let mut body = Vec::new();
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() {
+            break;
+        }
+        let s = line.trim();
+        if s.is_empty() {
+            continue;
+        }
+        let size = usize::from_str_radix(s.split(';').next().unwrap_or("0").trim(), 16).unwrap_or(0);
+        if size == 0 || body.len() + size > MAX_BODY {
+            break;
+        }
+        let mut chunk = vec![0u8; size];
+        if reader.read_exact(&mut chunk).is_err() {
+            break;
+        }
+        body.extend_from_slice(&chunk);
+        let mut crlf = String::new();
+        let _ = reader.read_line(&mut crlf);
+    }
+    body
 }
 
 fn route(stream: &mut TcpStream, req: Req) {
@@ -489,27 +570,63 @@ fn route(stream: &mut TcpStream, req: Req) {
     }
 
     if m == "POST" && (p == "/v1/images/generations" || p == "/v1/images/edits") {
-        return generate(stream, &req.body);
+        return generate(stream, &req);
     }
 
     json_resp(stream, 404, &json!({ "error": "not found" }))
 }
 
-fn generate(stream: &mut TcpStream, body: &[u8]) {
-    let v: Value = match serde_json::from_slice(body) {
-        Ok(v) => v,
-        Err(_) => return json_resp(stream, 400, &json!({ "error": { "message": "请求体不是合法 JSON" } })),
-    };
-    let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
-    if prompt.is_empty() {
-        return json_resp(stream, 400, &json!({ "error": { "message": "prompt 不能为空" } }));
-    }
-    let want_b64 = v.get("response_format").and_then(|x| x.as_str()) == Some("b64_json");
+fn generate(stream: &mut TcpStream, req: &Req) {
+    let low = req.ctype.to_lowercase();
+    let is_json_body = req.body.first().map(|b| *b == b'{' || *b == b'[').unwrap_or(false);
 
-    let refs = match collect_refs(&v) {
-        Ok(r) => r,
-        Err(e) => return json_resp(stream, 400, &json!({ "error": { "message": e } })),
+    util::log(&format!(
+        "[请求] {} {} · {}B · {}",
+        req.method,
+        req.path,
+        req.body.len(),
+        if req.ctype.is_empty() { "(无 content-type)".to_string() } else { req.ctype.clone() }
+    ));
+
+    let parsed = if low.contains("multipart/form-data") {
+        parse_multipart_req(&req.body, &req.ctype)
+    } else if low.contains("x-www-form-urlencoded") {
+        parse_form_req(&req.body)
+    } else if low.contains("json") || is_json_body || req.body.is_empty() {
+        parse_json_req(&req.body)
+    } else {
+        // 没写 content-type：先按 JSON 试，再按 multipart 试
+        parse_json_req(&req.body).or_else(|_| parse_multipart_req(&req.body, &req.ctype))
     };
+
+    let (prompt, want_b64, refs) = match parsed {
+        Ok(x) => x,
+        Err(e) => {
+            util::log(&format!("[请求] 解析失败：{} · 内容开头：{}", e, brief(&req.body)));
+            return json_resp(
+                stream,
+                400,
+                &json!({ "error": { "message": e, "type": "invalid_request_error" } }),
+            );
+        }
+    };
+
+    let prompt = prompt.trim().to_string();
+    if prompt.is_empty() {
+        return json_resp(
+            stream,
+            400,
+            &json!({ "error": { "message": "prompt 不能为空", "type": "invalid_request_error" } }),
+        );
+    }
+
+    // 请求里提到了图片却没认出参考图：把结构记下来，方便下次排查
+    if refs.is_empty() && !req.body.is_empty() {
+        let head = String::from_utf8_lossy(&req.body[..req.body.len().min(4096)]);
+        if head.contains("image") || head.contains("base64") || head.contains("Image") {
+            util::log(&format!("[请求] 没认出参考图，请求结构：{}", body_shape(&req.body)));
+        }
+    }
 
     let ticket = match sched::enqueue(&prompt, MAX_QUEUE) {
         Ok(t) => t,
@@ -562,7 +679,7 @@ fn generate(stream: &mut TcpStream, body: &[u8]) {
             let public_url = if res.direct {
                 res.src_url.clone()
             } else {
-                format!("http://{}:{}/files/{}", HOST, PORT, res.name)
+                format!("http://{}:{}/files/{}", HOST, port(), res.name)
             };
             let mut data = json!({ "url": public_url });
             if want_b64 {
@@ -768,8 +885,8 @@ fn b64(data: &[u8]) -> String {
 }
 
 // ---------- 参考图 ----------
-const MAX_REFS: usize = 3;
-const MAX_REF_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REFS: usize = 6;
+const MAX_REF_BYTES: usize = 10 * 1024 * 1024;
 
 fn b64_val(c: u8) -> Option<u8> {
     match c {
@@ -817,66 +934,406 @@ fn sniff_mime(b: &[u8]) -> Option<&'static str> {
     None
 }
 
-/// 从请求体里取参考图：支持 data URL、纯 base64、http(s) 地址三种写法。
-fn collect_refs(v: &Value) -> Result<Vec<ego::RefImage>, String> {
-    let mut raw: Vec<String> = Vec::new();
-    for key in ["image", "image_url", "imageUrl", "init_image", "reference_image", "source_image"] {
-        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
-            let s = s.trim();
-            if !s.is_empty() {
-                raw.push(s.to_string());
-            }
+/// 从一段字符串里取参考图：支持 data URL、纯 base64、http(s) 地址三种写法。
+fn fetch_ref(item: &str, idx: usize) -> Result<ego::RefImage, String> {
+    let item = item.trim();
+    if item.starts_with("http://") || item.starts_with("https://") {
+        let dir = base_dir().join("_ref");
+        let _ = std::fs::create_dir_all(&dir);
+        let dest = dir.join(format!("r{}_{}.img", util::now_ms(), idx));
+        util::download(item, &dest).map_err(|e| format!("参考图下载失败：{}", e))?;
+        let b = std::fs::read(&dest).map_err(|e| format!("参考图读取失败：{}", e))?;
+        let _ = std::fs::remove_file(&dest);
+        return finish_ref(b, None, idx);
+    }
+    let (declared, payload) = match item.strip_prefix("data:") {
+        Some(rest) => {
+            let (head, payload) = rest.split_once(',').ok_or("参考图的 data URL 格式不对")?;
+            (head.split(';').next().map(|s| s.to_string()), payload)
+        }
+        None => (None, item),
+    };
+    let clean: String = payload.chars().filter(|c| !c.is_whitespace()).collect();
+    let bytes = b64_decode(&clean).ok_or("参考图 base64 解不开")?;
+    finish_ref(bytes, declared, idx)
+}
+
+fn finish_ref(bytes: Vec<u8>, declared: Option<String>, idx: usize) -> Result<ego::RefImage, String> {
+    if bytes.is_empty() {
+        return Err("参考图是空的".into());
+    }
+    if bytes.len() > MAX_REF_BYTES {
+        return Err(format!("参考图太大（单张上限 {} MB）", MAX_REF_BYTES / 1024 / 1024));
+    }
+    let mime = match sniff_mime(&bytes) {
+        Some(m) => m.to_string(),
+        None => match declared.filter(|m| m.starts_with("image/")) {
+            Some(m) => m,
+            None => return Err("参考图格式不支持，只认 PNG / JPEG / WEBP / GIF".into()),
+        },
+    };
+    let ext = mime.rsplit('/').next().unwrap_or("png").to_string();
+    Ok((format!("ref{}.{}", idx + 1, ext), mime, b64(&bytes)))
+}
+
+/// 判断一个字符串值是不是图片：data URL / 图片链接 / 长 base64
+fn looks_like_image(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    if s.starts_with("data:image/") {
+        return true;
+    }
+    let low = s.to_ascii_lowercase();
+    if low.starts_with("http://") || low.starts_with("https://") {
+        return low.contains(".png")
+            || low.contains(".jpg")
+            || low.contains(".jpeg")
+            || low.contains(".webp")
+            || low.contains(".gif")
+            || low.contains("image")
+            || low.contains("blob");
+    }
+    // 纯 base64：去掉换行后全是 base64 字符，且解码出来能认出图片格式
+    let dense: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if dense.len() >= 64 && dense.bytes().all(|c| b64_val(c).is_some() || c == b'=') {
+        let head: String = dense.chars().take(4096).collect();
+        if let Some(b) = b64_decode(&head) {
+            return sniff_mime(&b).is_some();
         }
     }
-    if let Some(arr) = v.get("images").and_then(|x| x.as_array()) {
-        for it in arr {
-            if let Some(s) = it.as_str() {
-                let s = s.trim();
-                if !s.is_empty() {
-                    raw.push(s.to_string());
+    false
+}
+
+const REF_KEYS: [&str; 13] = [
+    "image",
+    "images",
+    "image_url",
+    "imageUrl",
+    "init_image",
+    "reference_image",
+    "reference_images",
+    "ref_images",
+    "source_image",
+    "input_image",
+    "img",
+    "photo",
+    "mask",
+];
+
+/// 从已知字段里取值，兼容字符串 / 数组 / {url:...} 三种形态
+fn grab_node(x: &Value, out: &mut Vec<String>) {
+    match x {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(a) => {
+            for it in a {
+                grab_node(it, out);
+            }
+        }
+        Value::Object(o) => {
+            for k in ["url", "b64_json", "base64", "data", "image_url", "image", "content", "src", "value"] {
+                if let Some(v) = o.get(k) {
+                    grab_node(v, out);
                 }
             }
         }
+        _ => {}
     }
-    if raw.len() > MAX_REFS {
+}
+
+/// 兜底：整个 JSON 里任何看起来像图片的值都收进来（字段名随便叫什么都能认）
+fn scan_any(x: &Value, out: &mut Vec<String>) {
+    match x {
+        Value::String(s) => {
+            if looks_like_image(s) {
+                out.push(s.clone());
+            }
+        }
+        Value::Array(a) => {
+            for it in a {
+                scan_any(it, out);
+            }
+        }
+        Value::Object(o) => {
+            for (_, v) in o {
+                scan_any(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_refs(v: &Value) -> Result<Vec<ego::RefImage>, String> {
+    let mut raw: Vec<String> = Vec::new();
+    for k in REF_KEYS {
+        if let Some(x) = v.get(k) {
+            grab_node(x, &mut raw);
+        }
+    }
+    scan_any(v, &mut raw);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut uniq: Vec<String> = Vec::new();
+    for s in raw {
+        let t = s.trim().to_string();
+        if t.is_empty() || !looks_like_image(&t) {
+            continue;
+        }
+        if seen.insert(t.clone()) {
+            uniq.push(t);
+        }
+    }
+    if uniq.len() > MAX_REFS {
         return Err(format!("参考图最多 {} 张", MAX_REFS));
     }
-
     let mut out = Vec::new();
-    for (i, item) in raw.iter().enumerate() {
-        let mut declared: Option<String> = None;
-        let bytes = if item.starts_with("http://") || item.starts_with("https://") {
-            let dir = base_dir().join("_ref");
-            let _ = std::fs::create_dir_all(&dir);
-            let dest = dir.join(format!("r{}_{}.img", util::now_ms(), i));
-            util::download(item, &dest).map_err(|e| format!("参考图下载失败：{}", e))?;
-            let b = std::fs::read(&dest).map_err(|e| format!("参考图读取失败：{}", e))?;
-            let _ = std::fs::remove_file(&dest);
-            b
-        } else if let Some(rest) = item.strip_prefix("data:") {
-            let (head, payload) = rest.split_once(',').ok_or("参考图的 data URL 格式不对")?;
-            declared = head.split(';').next().map(|s| s.to_string());
-            let clean: String = payload.chars().filter(|c| !c.is_whitespace()).collect();
-            b64_decode(&clean).ok_or("参考图 base64 解不开")?
-        } else {
-            let clean: String = item.chars().filter(|c| !c.is_whitespace()).collect();
-            b64_decode(&clean).ok_or("参考图 base64 解不开")?
-        };
-
-        if bytes.len() > MAX_REF_BYTES {
-            return Err(format!("参考图太大（单张上限 {} MB）", MAX_REF_BYTES / 1024 / 1024));
-        }
-        let mime = match sniff_mime(&bytes) {
-            Some(m) => m.to_string(),
-            None => match declared.filter(|m| m.starts_with("image/")) {
-                Some(m) => m,
-                None => return Err("参考图格式不支持，只认 PNG / JPEG / WEBP / GIF".into()),
-            },
-        };
-        let ext = mime.rsplit('/').next().unwrap_or("png").to_string();
-        out.push((format!("ref{}.{}", i + 1, ext), mime, b64(&bytes)));
+    for (i, s) in uniq.iter().enumerate() {
+        out.push(fetch_ref(s, i)?);
     }
     Ok(out)
+}
+
+// ---------- 请求格式：JSON / multipart / urlencoded ----------
+
+fn brief(body: &[u8]) -> String {
+    let s = String::from_utf8_lossy(&body[..body.len().min(200)]);
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shape(v: &Value) -> String {
+    match v {
+        Value::String(s) => format!("string({})", s.len()),
+        Value::Array(a) => format!("array({})", a.len()),
+        Value::Object(o) => format!("object({})", o.len()),
+        Value::Number(n) => format!("number({})", n),
+        Value::Bool(b) => format!("bool({})", b),
+        Value::Null => "null".to_string(),
+    }
+}
+
+/// 只打印请求体的字段结构和类型，不打印内容（图太大）
+fn body_shape(body: &[u8]) -> String {
+    if let Ok(v) = serde_json::from_slice::<Value>(body) {
+        if let Some(o) = v.as_object() {
+            return o
+                .iter()
+                .map(|(k, val)| format!("{}={}", k, shape(val)))
+                .collect::<Vec<_>>()
+                .join(" · ");
+        }
+    }
+    brief(body)
+}
+
+fn parse_json_req(body: &[u8]) -> Result<(String, bool, Vec<ego::RefImage>), String> {
+    let v: Value = serde_json::from_slice(body).map_err(|_| "请求体不是合法 JSON".to_string())?;
+    let prompt = v.get("prompt").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let want_b64 = v.get("response_format").and_then(|x| x.as_str()) == Some("b64_json")
+        || v.get("b64_json").and_then(|x| x.as_bool()) == Some(true);
+    let refs = collect_refs(&v)?;
+    Ok((prompt, want_b64, refs))
+}
+
+fn url_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(if b[i] == b'+' { b' ' } else { b[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn parse_form_req(body: &[u8]) -> Result<(String, bool, Vec<ego::RefImage>), String> {
+    let s = String::from_utf8_lossy(body).to_string();
+    let mut prompt = String::new();
+    let mut want_b64 = false;
+    let mut raws: Vec<String> = Vec::new();
+    for pair in s.split('&') {
+        let (k, v) = match pair.split_once('=') {
+            Some(x) => x,
+            None => continue,
+        };
+        let k = url_decode(k);
+        let val = url_decode(v);
+        if k == "prompt" {
+            prompt = val;
+        } else if k == "response_format" {
+            want_b64 = val == "b64_json";
+        } else if looks_like_image(&val) {
+            raws.push(val);
+        }
+    }
+    if raws.len() > MAX_REFS {
+        return Err(format!("参考图最多 {} 张", MAX_REFS));
+    }
+    let mut refs = Vec::new();
+    for (i, r) in raws.iter().enumerate() {
+        refs.push(fetch_ref(r, i)?);
+    }
+    Ok((prompt, want_b64, refs))
+}
+
+fn boundary_of(ctype: &str) -> Option<String> {
+    let low = ctype.to_lowercase();
+    let i = low.find("boundary=")?;
+    let s = ctype[i + 9..].trim();
+    if let Some(rest) = s.strip_prefix('"') {
+        let e = rest.find('"')?;
+        Some(rest[..e].to_string())
+    } else {
+        Some(s.split(';').next().unwrap_or(s).trim().to_string())
+    }
+}
+
+/// 取 form-data 里某个属性，如 name="x" / filename="a.png"
+fn attr(head: &str, key: &str) -> Option<String> {
+    let b = head.as_bytes();
+    let k = key.as_bytes();
+    let mut i = 0;
+    while i + k.len() < b.len() {
+        let hit = b[i..i + k.len()].eq_ignore_ascii_case(k)
+            && i > 0
+            && matches!(b[i - 1], b' ' | b';' | b'\t' | b'\r' | b'\n');
+        if hit {
+            let mut j = i + k.len();
+            if b.get(j) == Some(&b'=') {
+                j += 1;
+                if b.get(j) == Some(&b'"') {
+                    j += 1;
+                    let start = j;
+                    while j < b.len() && b[j] != b'"' {
+                        j += 1;
+                    }
+                    return Some(String::from_utf8_lossy(&b[start..j]).to_string());
+                }
+                let start = j;
+                while j < b.len() && b[j] != b';' && b[j] != b'\r' && b[j] != b'\n' {
+                    j += 1;
+                }
+                return Some(String::from_utf8_lossy(&b[start..j]).trim().to_string());
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_sub(h: &[u8], n: &[u8], from: usize) -> Option<usize> {
+    if n.is_empty() || h.len() < n.len() || from > h.len() - n.len() {
+        return None;
+    }
+    let mut i = from;
+    let last = h.len() - n.len();
+    while i <= last {
+        if &h[i..i + n.len()] == n {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_multipart_req(body: &[u8], ctype: &str) -> Result<(String, bool, Vec<ego::RefImage>), String> {
+    let bnd = match boundary_of(ctype) {
+        Some(b) => b,
+        None => {
+            return Err(format!(
+                "multipart 缺少 boundary（content-type：{}）",
+                if ctype.is_empty() { "空" } else { ctype }
+            ))
+        }
+    };
+    let marker = format!("--{}", bnd).into_bytes();
+    let sep = format!("\r\n--{}", bnd).into_bytes();
+
+    let mut pos = find_sub(body, &marker, 0).ok_or("multipart 里找不到分隔符，格式可能不对")?;
+    pos += marker.len();
+
+    let mut prompt = String::new();
+    let mut want_b64 = false;
+    let mut raws: Vec<(Option<String>, Vec<u8>)> = Vec::new();
+
+    loop {
+        if pos + 1 < body.len() && &body[pos..pos + 2] == b"--" {
+            break;
+        }
+        if pos + 1 < body.len() && &body[pos..pos + 2] == b"\r\n" {
+            pos += 2;
+        }
+        let end = find_sub(body, &sep, pos).unwrap_or(body.len());
+        let part = &body[pos..end];
+
+        let (head, content) = match find_sub(part, b"\r\n\r\n", 0) {
+            Some(x) => (&part[..x], &part[x + 4..]),
+            None => (&part[..0], part),
+        };
+        let hstr = String::from_utf8_lossy(head).to_string();
+        let name = attr(&hstr, "name").unwrap_or_default();
+        let fname = attr(&hstr, "filename").filter(|s| !s.is_empty());
+        let ptype = attr(&hstr, "content-type").filter(|s| !s.is_empty());
+        let lname = name.to_lowercase();
+
+        let looks_file = fname.is_some()
+            || ptype.as_deref().map(|p| p.to_lowercase().starts_with("image/")).unwrap_or(false)
+            || lname.contains("image")
+            || lname.contains("file")
+            || lname.contains("ref")
+            || lname.contains("photo")
+            || lname.contains("source")
+            || lname.contains("mask")
+            || lname.contains("img");
+
+        if looks_file && !content.is_empty() {
+            util::log(&format!(
+                "  part name={:?} file={:?} type={:?} {}B",
+                name,
+                fname,
+                ptype,
+                content.len()
+            ));
+            raws.push((ptype, content.to_vec()));
+        } else if lname == "prompt" || lname == "text" || lname == "q" {
+            prompt = String::from_utf8_lossy(content).trim().to_string();
+        } else if lname == "response_format" {
+            want_b64 = String::from_utf8_lossy(content).trim() == "b64_json";
+        } else if prompt.is_empty() {
+            if let Ok(s) = std::str::from_utf8(content) {
+                let t = s.trim();
+                if !t.is_empty() && !t.contains('\u{0}') {
+                    prompt = t.to_string();
+                }
+            }
+        }
+
+        if end >= body.len() {
+            break;
+        }
+        pos = end + sep.len();
+    }
+
+    if raws.len() > MAX_REFS {
+        return Err(format!("参考图最多 {} 张", MAX_REFS));
+    }
+    let mut refs = Vec::new();
+    for (i, (mime, bytes)) in raws.into_iter().enumerate() {
+        refs.push(finish_ref(bytes, mime, i)?);
+    }
+    Ok((prompt, want_b64, refs))
 }
 
 // ---------- 版本检测 ----------

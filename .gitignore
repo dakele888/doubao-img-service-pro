@@ -12,6 +12,7 @@
 /service.log
 /service.old.log
 /out/
+/_t*/
 /.webview/
 /.win/
 

@@ -9,13 +9,13 @@
      → 下载到缓存目录 → 返回图片地址
 ```
 
-界面是**程序自己的窗口**（Win32 外壳 + WebView2 渲染），双击就出，不需要浏览器、不需要记地址。**整个程序只有一个 exe（779 KB），不带任何外部 DLL。**支持文生图和参考图（图生图），调用方式见下文「参考图」一节。
+界面是**程序自己的窗口**（Win32 外壳 + WebView2 渲染），双击就出，不需要浏览器、不需要记地址。**整个程序只有一个 exe（802 KB），不带任何外部 DLL。**支持文生图和参考图（图生图），调用方式见下文「参考图」一节。
 
 ## 下载
 
 不想自己编译，直接下现成的：
 
-**[⬇ 下载豆包生图服务.exe（779 KB）](https://gitee.com/super88888/doubao-img-service/releases)**
+**[⬇ 下载豆包生图服务.exe（802 KB）](https://gitee.com/super88888/doubao-img-service/releases)**
 
 进「发行版」页面，附件里就是 exe。直链（版本升级会变）：
 
@@ -78,11 +78,11 @@ node -e "const c=require('crypto');console.log(c.createHash('md5').update('douba
 
 ## 换一台电脑 / 发给别人用
 
-**不是拷个 exe 就能用**。exe 本身只有 779KB，真正操作豆包的是 `ego-browser`，它属于 **ego lite**（装了 597MB，一份 Chromium）。所以目标机必须补齐三样：
+**不是拷个 exe 就能用**。exe 本身只有 802KB，真正操作豆包的是 `ego-browser`，它属于 **ego lite**（装了 597MB，一份 Chromium）。所以目标机必须补齐三样：
 
 | 需要的东西 | 体积 | 说明 |
 | --- | --- | --- |
-| 本 exe | **779 KB** | 就这一个文件，Rust 编译，不依赖 Node / .NET / VC 运行库 / 外部 DLL |
+| 本 exe | **802 KB** | 就这一个文件，Rust 编译，不依赖 Node / .NET / VC 运行库 / 外部 DLL |
 | **ego lite** | ~597 MB | 必须装。装完 `ego-browser` 才会出现，它是全流程的浏览器驱动 |
 | **豆包登录** | — | 在 ego 浏览器里打开 `doubao.com` 扫码登录，不登录什么也生成不了 |
 | WebView2 运行时 | 系统自带 | Windows 10/11 装了 Edge 就有，界面靠它渲染；缺了会自动退回浏览器窗口 |
@@ -153,17 +153,23 @@ node -e "const c=require('crypto');console.log(c.createHash('md5').update('douba
 
 | 传法 | 例子 |
 | --- | --- |
+| **multipart**（推荐） | `POST /v1/images/edits`，`-F prompt=改成水彩风 -F image=@a.png` |
 | 图片地址 | `{"prompt":"改成水彩风","image":"https://x.com/a.png"}` |
 | base64 | `{"prompt":"改成水彩风","image":"data:image/jpeg;base64,/9j/4AA..."}` |
-| 多张 | `{"prompt":"合成一张","images":["...","..."]}`，最多 3 张 |
+| 多张 | 多个文件字段，或 `{"prompt":"合成一张","images":["...","..."]}` |
 
-字段名 `image` / `image_url` / `init_image` / `reference_image` / `source_image` 都认，`images` 支持数组。
+上传方式不用挑，服务端几种都吃：
+
+- **multipart**：字段名叫 `image`、`image[]`、`image1`、`file`、`ref_pic` 都行——凡是带 `filename` 或 `Content-Type: image/*` 的 part 一律当参考图，`prompt` 从文本字段取（字段名是 `prompt`/`text`，或者干脆没名字都能认）。
+- **JSON**：`image` / `image_url` / `imageUrl` / `init_image` / `reference_image` / `ref_images` / `source_image` / `mask` 等字段都认，`images` 支持字符串数组和 `{url:...}` 对象数组。
+- **兜底**：上面的字段名都不是也不影响——服务会把整个 JSON 扫一遍，凡是像图片的值（`data:image/` 开头、图片链接、长 base64）都当参考图收下，按出现顺序粘贴。
+- 也支持表单 `application/x-www-form-urlencoded`。
 
 | 项目 | 说明 |
 | --- | --- |
 | 格式 | 只支持 PNG / JPEG / WEBP / GIF，按文件头识别，不看扩展名 |
-| 单张大小 | ≤ 8MB |
-| 张数 | 每次请求最多 3 张，**这次请求带几张就粘几张** |
+| 单张大小 | ≤ 10MB |
+| 张数 | 每次请求最多 6 张，**这次请求带几张就粘几张** |
 | 残留清理 | 上一轮若没发出去，缩略图会留在输入框里；下一轮开始前会自动刷新页面清空，保证不多不少 |
 | 耗时 | 比纯文字多 5~15 秒（要等图片上传），单张参考图实测 30~46 秒 |
 
@@ -207,7 +213,7 @@ node -e "const c=require('crypto');console.log(c.createHash('md5').update('douba
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | POST | `/v1/images/generations` | `{prompt, n, image?}` → `{data:[{url}]}`，`response_format=b64_json` 时附 base64 |
-| POST | `/v1/images/edits` | 同一条处理流程（参考图也走这里） |
+| POST | `/v1/images/edits` | 同一条处理流程，额外支持 `multipart/form-data` 上传（参考图走这里最常见） |
 | GET | `/` | 管理面板 |
 | GET | `/health` | 健康检查 |
 | GET | `/api/config` | 配置 + 缓存统计 + 图片列表 + 队列快照 |
@@ -222,22 +228,22 @@ node -e "const c=require('crypto');console.log(c.createHash('md5').update('douba
 | POST | `/api/release` | 用默认浏览器打开 Gitee 发行版页面 |
 | GET | `/files/<name>` | 取图 |
 
-端口固定 `8788`（监听 `127.0.0.1`，仅本机可访问）。排队上限 30、单张生成超时 240 秒、排队等待上限 30 分钟，都是 `src/main.rs` 顶部的常量，要改直接改那里重新编译。
+端口默认 `8788`（监听 `127.0.0.1`，仅本机可访问；设环境变量 `DOUBAO_PORT` 可改成别的）。排队上限 30、单张生成超时 240 秒、排队等待上限 30 分钟，都是 `src/main.rs` 顶部的常量，要改直接改那里重新编译。
 
 ## 源码与构建
 
 ```bash
 cargo build --release
-powershell -ExecutionPolicy Bypass -File build.ps1   # 编译 + 补图标 + 输出到 dist\
+powershell -ExecutionPolicy Bypass -File build.ps1   # 编译 + 输出到 dist\
 ```
 
-`build.ps1` 做的事就是：`cargo build --release` → 复制成 `dist\豆包生图服务.exe` → 用 `tools\rcedit-x64.exe` 嵌入 `icon.ico`。
+`build.ps1` 做的事就是：`cargo build --release` → 复制成 `dist\豆包生图服务.exe`。
 
-`tools\rcedit-x64.exe` 是 1.8MB 的第三方工具，没进仓库。需要的话从 https://github.com/electron/rcedit/releases 下载放进 `tools\`；没有它也能编译，只是 exe 没有自定义图标。
+图标在**编译期**就嵌好了：`build.rs` 调 GNU binutils 的 `windres`，把 `icon.ico` 转成资源对象交给链接器，PE 里带 `.rsrc` 节。所以不需要额外的第三方 exe 工具。找不到 `windres`（或没装 mingw-w64 binutils）也能编译，只是 exe 没有自定义图标，编译时会有一条 warning。
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/main.rs` | HTTP 服务、路由、生成流程、单实例唤醒 |
+| `src/main.rs` | HTTP 服务、路由、请求格式解析（JSON / multipart / 表单）、生成流程、单实例唤醒 |
 | `src/ego.rs` | 拼 ego-browser 要跑的脚本（含未登录检测）、带超时执行 |
 | `src/sched.rs` | 串行队列（Condvar 严格 FIFO） |
 | `src/cfg.rs` | config.json 读写 |
@@ -246,8 +252,9 @@ powershell -ExecutionPolicy Bypass -File build.ps1   # 编译 + 补图标 + 输�
 | `src/auth.rs` | 启动验证窗（免责声明 + 密码） |
 | `src/panel.html` | 管理面板，编译时 `include_str!` 进 exe |
 | `assets/WebView2Loader.dll` | 158 KB，编译时 `include_bytes!` 进 exe |
+| `build.rs` / `icon.rc` | 编译期把 icon.ico 嵌进 exe |
 
-依赖只有 `serde_json` / `md-5` 和 `windows` / `webview2-com`（纯头文件式绑定，不链外部 DLL）；下载图片走系统自带 `curl.exe`，所以不需要 OpenSSL / 微软运行库。编译参数是 `opt-level="z"` + `lto` + `panic=abort` + `strip`，所以 exe 只有 719 KB。
+依赖只有 `serde_json` / `md-5` 和 `windows` / `webview2-com`（纯头文件式绑定，不链外部 DLL）；下载图片走系统自带 `curl.exe`，所以不需要 OpenSSL / 微软运行库。编译参数是 `opt-level="z"` + `lto` + `panic=unwind` + `strip`，所以 exe 只有 802 KB（`panic=unwind` 是为了单个请求崩了不拖垮整个服务）。
 
 **编译前必须存在 `assets\WebView2Loader.dll`**（取自 webview2-com-sys 的 `x64/` 目录），它被编进 exe，运行时释放到程序目录 `.webview\rt\`（不可写才退回 `%LOCALAPPDATA%\doubao-img\runtime\`）再 `LoadLibrary` + `GetProcAddress` 动态调用。这样 exe 的导入表里没有任何 WebView2 DLL，拷到哪都能跑。
 
