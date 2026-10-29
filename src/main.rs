@@ -1481,6 +1481,26 @@ fn latest_release(force: bool) -> Option<Release> {
             }
         }
     }
+    // 主通道：官方 API（能拿到准确附件名和地址）
+    let mut rel = fetch_release_api();
+    // 兜底通道：API 有每小时限流，撞上了就走网页重定向拿版本号
+    if rel.is_none() {
+        rel = fetch_release_web();
+        if rel.is_some() {
+            util::log("[更新] API 不可用（多为限流），已改用网页通道获取版本");
+        }
+    }
+    // 查到了就更新缓存；没查到时保留旧缓存，别让一次网络抖动把已知数据清掉
+    if let Ok(mut g) = m.lock() {
+        if rel.is_some() || g.as_ref().map(|(_, v)| v.is_none()).unwrap_or(true) {
+            *g = Some((util::now_ms(), rel.clone()));
+        }
+    }
+    rel
+}
+
+/// Gitee 官方 API：匿名调用每小时有配额，超了返回 403
+fn fetch_release_api() -> Option<Release> {
     let out = Command::new("curl")
         .args([
             "-sS",
@@ -1492,43 +1512,66 @@ fn latest_release(force: bool) -> Option<Release> {
         ])
         .creation_flags(util::CREATE_NO_WINDOW)
         .output()
-        .ok();
-    let mut rel: Option<Release> = None;
-    if let Some(o) = out {
-        if let Ok(v) = serde_json::from_slice::<Value>(&o.stdout) {
-            let tag = v
-                .get("tag_name")
-                .and_then(|x| x.as_str())
-                .map(|s| s.trim_start_matches('v').to_string())
-                .unwrap_or_default();
-            // Gitee 会自带源码 zip，这里只挑 exe 附件
-            let url = v
-                .get("assets")
-                .and_then(|x| x.as_array())
-                .and_then(|a| {
-                    a.iter().find(|it| {
-                        it.get("name")
-                            .and_then(|n| n.as_str())
-                            .map(|n| n.to_lowercase().ends_with(".exe"))
-                            .unwrap_or(false)
-                    })
-                })
-                .and_then(|it| it.get("browser_download_url"))
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_string();
-            if !tag.is_empty() {
-                rel = Some(Release { tag, url });
-            }
-        }
+        .ok()?;
+    let v = serde_json::from_slice::<Value>(&out.stdout).ok()?;
+    let tag = v
+        .get("tag_name")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim_start_matches('v').to_string())
+        .unwrap_or_default();
+    if tag.is_empty() {
+        return None;
     }
-    // 查到了就更新缓存；没查到时保留旧缓存，别让一次网络抖动把已知数据清掉
-    if let Ok(mut g) = m.lock() {
-        if rel.is_some() || g.as_ref().map(|(_, v)| v.is_none()).unwrap_or(true) {
-            *g = Some((util::now_ms(), rel.clone()));
-        }
+    // Gitee 会自带源码 zip，这里只挑 exe 附件
+    let url = v
+        .get("assets")
+        .and_then(|x| x.as_array())
+        .and_then(|a| {
+            a.iter().find(|it| {
+                it.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.to_lowercase().ends_with(".exe"))
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(|it| it.get("browser_download_url"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some(Release { tag, url })
+}
+
+/// 网页通道（不走 API，不限流）：
+/// https://gitee.com/.../releases/latest 会 302 到 /releases/tag/v1.2.5，从跳转地址取版本号；
+/// 下载地址按固定模式拼（附件名固定为 豆包生图服务.exe，URL 编码写死）。
+fn fetch_release_web() -> Option<Release> {
+    let out = Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time",
+            "10",
+            "-o",
+            "NUL",
+            "-w",
+            "%{redirect_url}",
+            "-H",
+            "User-Agent: doubao-img",
+            "https://gitee.com/super88888/doubao-img-service/releases/latest",
+        ])
+        .creation_flags(util::CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let loc = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let tag = loc.rsplit('/').next().unwrap_or("").trim_start_matches('v').to_string();
+    // 只有版本号形态才对，跳登录页之类的一律不认
+    if tag.is_empty() || !tag.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        return None;
     }
-    rel
+    let url = format!(
+        "https://gitee.com/super88888/doubao-img-service/releases/download/v{}/%E8%B1%86%E5%8C%85%E7%94%9F%E5%9B%BE%E6%9C%8D%E5%8A%A1.exe",
+        tag
+    );
+    Some(Release { tag, url })
 }
 
 /// 用 ShellExecute 拉起新进程：参数走命令行，新进程由系统 shell 创建
