@@ -27,10 +27,21 @@ static PORT_V: OnceLock<u16> = OnceLock::new();
 /// 默认 8788，可用环境变量 DOUBAO_PORT 覆盖
 pub fn port() -> u16 {
     *PORT_V.get_or_init(|| {
-        std::env::var("DOUBAO_PORT")
+        let from_env = std::env::var("DOUBAO_PORT")
             .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(PORT_DEFAULT)
+            .and_then(|v| v.trim().parse().ok());
+        match from_env {
+            Some(p) => p,
+            None => {
+                // 更新重启走 ShellExecute，环境变量传不过来，只能靠命令行
+                let args: Vec<String> = std::env::args().collect();
+                args.iter()
+                    .position(|a| a == "--port")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(PORT_DEFAULT)
+            }
+        }
     })
 }
 const HOST: &str = "127.0.0.1";
@@ -74,22 +85,54 @@ fn main() {
 
     let addr = format!("{}:{}", HOST, port());
 
-    // 已经有实例在跑：让它把窗口提到前面，本进程直接退出
+    // 更新后重启：旧进程还没退出，先等它把端口放出来，别去唤醒它
+    let args: Vec<String> = std::env::args().collect();
+    let has_arg = |f: &str| args.iter().any(|a| a == f);
+    let restarting = std::env::var("DOUBAO_RESTART").map(|v| v.trim() == "1").unwrap_or(false) || has_arg("--restart");
+
     if TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(600)).is_ok() {
-        util::log("检测到已有实例，唤醒它的窗口");
-        poke("/api/show");
-        return;
+        if restarting {
+            for _ in 0..60 {
+                if TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(300)).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(300));
+            }
+        } else {
+            util::log("检测到已有实例，唤醒它的窗口");
+            poke("/api/show");
+            return;
+        }
     }
 
     let cfg = Config::load(&config_file());
 
     // 仅供自动化测试 / 无界面部署：设置了 DOUBAO_HEADLESS=1 就不弹验证窗、不建窗口
-    let headless = std::env::var("DOUBAO_HEADLESS").map(|v| v.trim() == "1").unwrap_or(false);
+    let headless = std::env::var("DOUBAO_HEADLESS").map(|v| v.trim() == "1").unwrap_or(false)
+        || has_arg("--headless");
+    // 更新重启时用：不重复弹免责声明和密码
+    let trusted = std::env::var("DOUBAO_SKIP_AUTH").map(|v| v.trim() == "1").unwrap_or(false)
+        || has_arg("--trusted");
 
     // 免责声明每次都显示；启动密码可以在面板里关掉
-    if !headless && !auth::unlock(cfg.require_password) {
+    if !headless && !trusted && !auth::unlock(cfg.require_password) {
         util::log("启动验证未通过，退出");
         return;
+    }
+    if trusted {
+        util::log("更新后自动重启，已跳过启动验证");
+    }
+
+    // 上一次更新留下的备份，能删就删
+    if restarting || trusted {
+        if let Ok(entries) = std::fs::read_dir(base_dir()) {
+            for e in entries.flatten() {
+                let n = e.file_name().to_string_lossy().to_lowercase();
+                if n.ends_with(".old.exe") || n == "_update.exe" {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
     }
 
     let od = out_dir(&cfg);
@@ -506,18 +549,41 @@ fn route(stream: &mut TcpStream, req: Req) {
     // 用系统默认浏览器打开 ego 官网文档（URL 写死，不接受外部传入）
     if m == "GET" && p == "/api/version" {
         let current = env!("CARGO_PKG_VERSION").to_string();
-        let latest = latest_release();
-        let has = latest.as_deref().map(|l| is_newer(l, &current)).unwrap_or(false);
+        let rel = latest_release();
+        let has = rel.as_ref().map(|r| is_newer(&r.tag, &current)).unwrap_or(false);
         return json_resp(
             stream,
             200,
             &json!({
                 "current": current,
-                "latest": latest,
+                "latest": rel.as_ref().map(|r| r.tag.clone()),
                 "hasUpdate": has,
+                "downloadUrl": rel.as_ref().map(|r| r.url.clone()).unwrap_or_default(),
                 "url": "https://gitee.com/super88888/doubao-img-service/releases",
             }),
         );
+    }
+
+    // 一键更新：下载新版 exe 替换自己并重启（返回 200 后本进程就退出了）
+    if m == "POST" && p == "/api/update" {
+        return match do_update() {
+            Ok(v) => {
+                let restart = v.get("restarting").and_then(|x| x.as_bool()).unwrap_or(false);
+                json_resp(stream, 200, &v);
+                if restart {
+                    webview::remove_tray();
+                    // 给新进程让位：本进程退出后端口就空出来了
+                    let _ = stream.flush();
+                    thread::sleep(Duration::from_millis(400));
+                    util::log("[更新] 旧进程退出");
+                    std::process::exit(0);
+                }
+            }
+            Err(e) => {
+                util::log(&format!("[更新] 失败：{}", e));
+                json_resp(stream, 200, &json!({ "ok": false, "error": { "message": e } }))
+            }
+        };
     }
 
     if m == "POST" && p == "/api/release" {
@@ -1337,7 +1403,7 @@ fn parse_multipart_req(body: &[u8], ctype: &str) -> Result<(String, bool, Vec<eg
 }
 
 // ---------- 版本检测 ----------
-static VER_CACHE: OnceLock<std::sync::Mutex<Option<(u64, Option<String>)>>> = OnceLock::new();
+static VER_CACHE: OnceLock<std::sync::Mutex<Option<(u64, Option<Release>)>>> = OnceLock::new();
 
 fn ver_tuple(s: &str) -> Vec<u32> {
     s.split(|c: char| !c.is_ascii_digit())
@@ -1359,8 +1425,14 @@ fn is_newer(latest: &str, current: &str) -> bool {
     false
 }
 
-/// 查 Gitee 上最新发行版的 tag，10 分钟内复用缓存
-fn latest_release() -> Option<String> {
+#[derive(Clone)]
+struct Release {
+    tag: String,
+    url: String,
+}
+
+/// 查 Gitee 上最新发行版的 tag 和 exe 下载地址，10 分钟内复用缓存
+fn latest_release() -> Option<Release> {
     let m = VER_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(g) = m.lock() {
         if let Some((at, v)) = g.as_ref() {
@@ -1373,7 +1445,7 @@ fn latest_release() -> Option<String> {
         .args([
             "-sS",
             "--max-time",
-            "8",
+            "10",
             "-H",
             "User-Agent: doubao-img",
             "https://gitee.com/api/v5/repos/super88888/doubao-img-service/releases/latest",
@@ -1381,19 +1453,128 @@ fn latest_release() -> Option<String> {
         .creation_flags(util::CREATE_NO_WINDOW)
         .output()
         .ok();
-    let mut tag = None;
+    let mut rel: Option<Release> = None;
     if let Some(o) = out {
         if let Ok(v) = serde_json::from_slice::<Value>(&o.stdout) {
-            tag = v
+            let tag = v
                 .get("tag_name")
                 .and_then(|x| x.as_str())
-                .map(|s| s.trim_start_matches('v').to_string());
+                .map(|s| s.trim_start_matches('v').to_string())
+                .unwrap_or_default();
+            // Gitee 会自带源码 zip，这里只挑 exe 附件
+            let url = v
+                .get("assets")
+                .and_then(|x| x.as_array())
+                .and_then(|a| {
+                    a.iter().find(|it| {
+                        it.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|n| n.to_lowercase().ends_with(".exe"))
+                            .unwrap_or(false)
+                    })
+                })
+                .and_then(|it| it.get("browser_download_url"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !tag.is_empty() {
+                rel = Some(Release { tag, url });
+            }
         }
     }
     if let Ok(mut g) = m.lock() {
-        *g = Some((util::now_ms(), tag.clone()));
+        *g = Some((util::now_ms(), rel.clone()));
     }
-    tag
+    rel
+}
+
+/// 用 ShellExecute 拉起新进程：参数走命令行，新进程由系统 shell 创建
+fn shell_start(exe: &PathBuf) -> bool {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let dir = match exe.parent() {
+        Some(p) => p.to_string_lossy().to_string(),
+        None => return false,
+    };
+    // 新进程不继承本进程的环境变量，运行模式只能靠命令行传过去
+    let mut params = String::from("--restart --trusted");
+    let headless = std::env::var("DOUBAO_HEADLESS").map(|v| v.trim() == "1").unwrap_or(false)
+        || std::env::args().any(|a| a == "--headless");
+    if headless {
+        params.push_str(" --headless");
+    }
+    if port() != PORT_DEFAULT {
+        params.push_str(&format!(" --port {}", port()));
+    }
+    let h = unsafe {
+        ShellExecuteW(
+            None,
+            &windows::core::HSTRING::from("open"),
+            &windows::core::HSTRING::from(exe.to_string_lossy().as_ref()),
+            &windows::core::HSTRING::from(params.as_str()),
+            &windows::core::HSTRING::from(dir.as_str()),
+            SW_SHOWNORMAL,
+        )
+    };
+    // 返回值大于 32 才是成功，否则是错误码
+    h.0 as isize > 32
+}
+
+/// 一键更新：下新版 → 换掉自己 → 重启。返回给前端的只是执行结果，
+/// 真正重启由这里 spawn 出来，旧进程随即退出。
+fn do_update() -> Result<Value, String> {
+    let cur = env!("CARGO_PKG_VERSION").to_string();
+    *VER_CACHE.get_or_init(|| std::sync::Mutex::new(None)).lock().unwrap() = None; // 强制重查
+    let rel = latest_release().ok_or("查不到最新版本（网络不通或 Gitee 访问不了）")?;
+    if !is_newer(&rel.tag, &cur) {
+        return Ok(json!({ "ok": true, "upToDate": true, "current": cur, "latest": rel.tag }));
+    }
+    if rel.url.is_empty() {
+        return Err("最新版里没找到 exe 附件".into());
+    }
+
+    let exe = std::env::current_exe().map_err(|_| "拿不到本程序的路径")?;
+    let dir = exe.parent().map(|p| p.to_path_buf()).ok_or("拿不到程序目录")?;
+    let tmp = dir.join("_update.exe");
+
+    util::log(&format!("[更新] 下载 v{}", rel.tag));
+    let size = util::download(&rel.url, &tmp).map_err(|e| format!("下载失败：{}", e))?;
+    if size < 300 * 1024 {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("下载的文件不对（只有 {} 字节）", size));
+    }
+    let mut head = [0u8; 2];
+    let is_pe = std::fs::File::open(&tmp)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .map(|_| &head == b"MZ")
+        .unwrap_or(false);
+    if !is_pe {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("下载下来的不是可执行文件（拿到的是网页或报错页）".into());
+    }
+
+    // 当前 exe 在跑着，删不掉但能改名；改完把新版顶上去
+    let stem = exe
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "doubao-img".into());
+    let bak = dir.join(format!("{}.old.exe", stem));
+    let _ = std::fs::remove_file(&bak);
+    std::fs::rename(&exe, &bak).map_err(|e| format!("把旧版改名失败：{}", e))?;
+    if let Err(e) = std::fs::rename(&tmp, &exe) {
+        // 换不回去就还原，别把程序弄没了
+        let _ = std::fs::rename(&bak, &exe);
+        return Err(format!("换上新版本失败：{}", e));
+    }
+    util::log(&format!("[更新] 已换到 v{}，准备重启", rel.tag));
+
+    // 交给系统 shell 启动：新进程挂到 explorer 名下，
+    // 不会跟着本进程的宿主一起被回收（有些启动器会连带子进程一起清掉）
+    let started = shell_start(&exe);
+    if !started {
+        return Err("新版放好了，但没启动起来，请手动双击运行".into());
+    }
+    Ok(json!({ "ok": true, "restarting": true, "latest": rel.tag, "current": cur }))
 }
 
 static PANEL: &str = include_str!("panel.html");

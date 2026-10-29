@@ -278,7 +278,7 @@ function renderVer(d){
   if(VER.hasUpdate){
     b.textContent='↑ 新版本 v'+VER.latest;
     b.classList.add('upd');
-    b.title='当前 v'+VER.current+'，点击去 Gitee 下载';
+    b.title='当前 v'+VER.current+'，点击一键更新并重启';
   }else{
     b.textContent='v'+(VER.current||'');
     b.classList.remove('upd');
@@ -296,11 +296,55 @@ function checkVer(manual){
     if(manual) toast('检查失败：网络不通或 Gitee 访问不了');
   });
 }
-function verClick(){
-  if(VER.hasUpdate){
-    api('/api/release',{method:'POST'}).then(function(){toast('已在浏览器打开下载页');}).catch(function(){toast('打开失败');});
-    return;
+// 等新进程起来：轮询 /api/version，版本号对上就刷新页面
+function waitRestart(target){
+  var t0=Date.now();
+  var iv=setInterval(function(){
+    var timeout=Date.now()-t0>90000;
+    fetch('/api/version').then(function(r){return r.json()}).then(function(d){
+      if(d.current===target||timeout){clearInterval(iv);afterRestart(d&&d.current===target);}
+    }).catch(function(){
+      if(timeout){clearInterval(iv);afterRestart(false);}
+    });
+  },2000);
+}
+function afterRestart(ok){
+  if(ok){
+    toast('更新完成，页面刷新中');
+    location.reload();
+  }else{
+    toast('程序已经是新版了，但没检测到自动重启——双击一下程序图标就好');
+    var b=document.getElementById('verBtn');
+    if(b){b.textContent='请手动启动';b.classList.add('upd');}
   }
+}
+function doUpdate(){
+  var b=document.getElementById('verBtn');
+  if(!b) return;
+  if(!confirm('更新到 v'+VER.latest+'？\n\n会下载新版本（约 800 KB）替换当前 exe 并自动重启服务，一般 10~60 秒。')) return;
+  b.textContent='下载中…';
+  b.disabled=true;
+  fetch('/api/update',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+    b.disabled=false;
+    if(d.ok&&d.restarting){
+      toast('已更新到 v'+d.latest+'，正在重启…');
+      b.textContent='重启中…';
+      waitRestart(d.latest);
+    }else if(d.ok){
+      toast('已经是最新版本 v'+(d.current||VER.current));
+      renderVer();
+    }else{
+      toast('更新失败：'+((d.error&&d.error.message)||d.error||'未知错误'));
+      renderVer();
+    }
+  }).catch(function(){
+    b.disabled=false;
+    toast('请求中断，稍等几秒刷新页面看看是否已在重启');
+    setTimeout(function(){location.reload();},5000);
+  });
+}
+function verClick(){
+  if(VER.hasUpdate){ doUpdate(); return; }
   checkVer(true);
 }
 function renderPwd(on){

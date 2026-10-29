@@ -461,6 +461,14 @@ pub fn bring_to_front() {
     }
 }
 
+/// 退出前把托盘图标摘掉，别在任务栏留个幽灵图标
+pub fn remove_tray() {
+    let p = MAIN_HWND.load(Ordering::Relaxed);
+    if p != 0 {
+        stop_tray(HWND(p as *mut c_void));
+    }
+}
+
 pub fn alive() -> bool {
     MAIN_HWND.load(Ordering::Relaxed) != 0
 }
