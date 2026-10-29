@@ -192,6 +192,8 @@ powershell -ExecutionPolicy Bypass -File build.ps1   # 编译 + 补图标 + 输�
 
 `build.ps1` 做的事就是：`cargo build --release` → 复制成 `dist\豆包生图服务.exe` → 用 `tools\rcedit-x64.exe` 嵌入 `icon.ico`。
 
+`tools\rcedit-x64.exe` 是 1.8MB 的第三方工具，没进仓库。需要的话从 https://github.com/electron/rcedit/releases 下载放进 `tools\`；没有它也能编译，只是 exe 没有自定义图标。
+
 | 文件 | 职责 |
 | --- | --- |
 | `src/main.rs` | HTTP 服务、路由、生成流程、单实例唤醒 |
