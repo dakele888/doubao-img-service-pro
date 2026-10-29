@@ -1591,6 +1591,19 @@ fn produce_image(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failu
     let _ = std::fs::create_dir_all(&od);
     let name = util::md5_name(&url);
     let file = od.join(&name);
+    // 豆包视频地址带 lr=video_gen_watermark_dyn（预览带水印），
+    // 换成 lr=video_gen_no_watermark 能拿到无水印源；拿不到就退回原地址。
+    let nowm = url
+        .replace("lr=video_gen_watermark_dyn", "lr=video_gen_no_watermark")
+        .replace("lr=video_gen_watermark", "lr=video_gen_no_watermark");
+    if nowm != url {
+        if let Ok(bytes) = util::download(&nowm, &file) {
+            util::log(&format!("[视频] 已取无水印版（{}KB）", bytes / 1024));
+            util::auto_clean(&od, &cfg);
+            return Ok(Produced { direct: false, src_url: url, name, bytes, file });
+        }
+        util::log("[视频] 无水印地址不可用，改用原始地址（带水印）");
+    }
     match util::download(&url, &file) {
         Ok(bytes) => {
             util::auto_clean(&od, &cfg);

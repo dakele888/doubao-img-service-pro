@@ -938,6 +938,7 @@ async function main() {
 
   let confirmState = "none";
   let confirmTries = 0;
+  let coverState = "";
   try {
     await page.click("css:.tiptap");
     await page.waitForTimeout(300);
@@ -957,19 +958,52 @@ async function main() {
   const deadline = Date.now() + @@DEADLINE@@;
   let hit = null;
   let freshUrls = [];
+  let coverClicked = false;
   while (Date.now() < deadline) {
-    await page.waitForTimeout(3000);
-    // 参数确认卡可能晚几秒才出现，没点中就再试
-    if (confirmTries < 2) {
-      const c = await tryConfirmVideoParams();
-      if (c !== "none") { confirmState = c; confirmTries++; }
-    }
-    const list = await videoUrls();
-    const fresh = list.filter((s) => !before[s]);
-    if (fresh.length) {
-      hit = fresh[fresh.length - 1];
-      freshUrls = fresh;
-      break;
+    try {
+      await page.waitForTimeout(3000);
+      // 参数确认卡可能晚几秒才出现，没点中就再试
+      if (confirmTries < 2) {
+        const c = await tryConfirmVideoParams();
+        if (c !== "none") { confirmState = c; confirmTries++; }
+      }
+      // 豆包生成完是用一张封面图（img[class*=cover-]）展示的，页面上没有 <video>。
+      // 必须点一下封面，播放器才会创建 <video> 元素，才能拿到真实 mp4 地址。
+      if (!coverClicked) {
+        const ready = await page.evaluate(() =>
+          /视频.{0,4}生成好了|视频已生成|生成完成|视频生成完成/.test((document.body.innerText || "").slice(-2000))
+        );
+        if (ready) {
+          const ok = await page.evaluate(() => {
+            const c = document.querySelector("img[class*=cover-]");
+            if (!c) return false;
+            (c.closest("[class*=video]") || c).click();
+            c.click();
+            return true;
+          });
+          if (ok) {
+            coverClicked = true;
+            coverState = "clicked";
+            await page.waitForTimeout(1800);
+          }
+        }
+      }
+      const list = await videoUrls();
+      const fresh = list.filter((s) => !before[s]);
+      if (fresh.length) {
+        hit = fresh[fresh.length - 1];
+        freshUrls = fresh;
+        break;
+      }
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      // 中途被人工接管会暂停自动化，拿回控制权后继续等
+      if (/with the user|handOff|stopForUserControl/i.test(msg)) {
+        try { await takeOverTaskSpace(task.spaceId); } catch (e2) {}
+        await page.waitForTimeout(1500);
+        continue;
+      }
+      throw e;
     }
   }
 
