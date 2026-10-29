@@ -744,17 +744,15 @@ async function dismissSafetyDialog() {
 
 // 按请求里的 model 切豆包视频模型。
 // 豆包可选：Seedance 2.5（5 倍消耗）/ Seedance 2.0（2 倍）/ Seedance 2.0 Fast / Seedance 2.0 Mini
-// 关键词映射，认不出就保持当前模型不动（模型影响消耗，不能乱切）。
+// 默认 Mini：没传 model、或者模型名认不出，都回落到 Mini（日常生成、消耗最低）。
 async function pickModel() {
   const mm = PROMPT.match(/模型\s*([A-Za-z0-9._\- ]{2,40})/);
   const want = mm ? mm[1].trim().toLowerCase() : "";
-  if (!want) return "";
-  let target = "";
+  let target = "Seedance 2.0 Mini";
   if (want.indexOf("fast") >= 0) target = "Seedance 2.0 Fast";
   else if (want.indexOf("2.5") >= 0) target = "Seedance 2.5";
   else if (want.indexOf("mini") >= 0) target = "Seedance 2.0 Mini";
   else if (want.indexOf("seedance") >= 0 || want.indexOf("2.0") >= 0 || want.indexOf("sd2") >= 0) target = "Seedance 2.0";
-  if (!target) return "";
 
   const cur = await page.evaluate(() => {
     for (const n of [...document.querySelectorAll("span,div")]) {
