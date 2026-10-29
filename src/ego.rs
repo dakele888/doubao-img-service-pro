@@ -796,6 +796,25 @@ async function pickModel() {
   return ok ? target : "";
 }
 
+// 豆包视频生成是两段式：发完提示词先回一张「视频生成参数确认」卡片（列出模型/时长/比例），
+// 点「确认」才真正开始生成。有时不弹这张卡（直接生成），所以做成"有就点、没有就跳过"。
+// 返回 clicked / found-no-button / none
+async function tryConfirmVideoParams() {
+  return await page.evaluate(() => {
+    const t = (document.body.innerText || "").slice(-3000);
+    if (!/视频生成参数确认|确认后我再开始生成|请先确认以下参数/.test(t)) return "none";
+    for (const n of [...document.querySelectorAll("button,[role=button],div,span")]) {
+      if (n.children.length !== 0) continue;
+      const s = (n.innerText || "").trim();
+      if (s !== "确认" && s !== "确认生成" && s !== "开始生成" && s !== "继续" && s !== "好的") continue;
+      if (n.getBoundingClientRect().width <= 0) continue;
+      (n.closest("button") || n).click();
+      return "clicked:" + s;
+    }
+    return "found-no-button";
+  });
+}
+
 // 设置画面参数：输入框上方有「自动 · Ns」控件，点开是「比例 + 时长」面板。
 // 比例是 7 个按钮（自动/3:4/4:3/9:16/16:9/1:1/21:9），时长是 4~15s 的自定义滑杆。
 // 参数从提示词前缀里取（服务端已拼成「（画面比例 9:16，分辨率 720p，时长 12 秒）…」）。
@@ -878,9 +897,17 @@ async function setVideoParams() {
     }
   }
 
-  // 4) 收起面板
-  try { await page.keyboard.press("Escape"); } catch (e) {}
-  await page.waitForTimeout(300);
+  // 4) 收起面板（实测 Esc 不一定有效，还开着就点空白区域）
+  for (let i = 0; i < 4; i++) {
+    const open = await page.evaluate(() => /比例[\s\S]{0,40}时长/.test((document.body.innerText || "").slice(-700)));
+    if (!open) break;
+    try { await page.keyboard.press("Escape"); } catch (e) {}
+    await page.waitForTimeout(450);
+    const still = await page.evaluate(() => /比例[\s\S]{0,40}时长/.test((document.body.innerText || "").slice(-700)));
+    if (!still) break;
+    try { await page.mouse.click(420, 260); } catch (e) {}
+    await page.waitForTimeout(450);
+  }
   return res;
 }
 
@@ -927,6 +954,7 @@ async function main() {
   const rf = await attachRefs();
   if (!rf.ok) { emit({ ok: false, error: rf.error }); return; }
 
+  let confirmState = "none";
   try {
     await page.click("css:.tiptap");
     await page.waitForTimeout(300);
@@ -935,6 +963,9 @@ async function main() {
     await page.press("css:.tiptap", "Enter");
     // 提交时也可能才弹安全确认
     await dismissSafetyDialog();
+    // 豆包先回一张「视频生成参数确认」卡，点确认才真正开始生成
+    await page.waitForTimeout(2200);
+    confirmState = await tryConfirmVideoParams();
   } catch (e) {
     emit({ ok: false, error: "输入提示词失败：" + String((e && e.message) || e) });
     return;
@@ -945,6 +976,11 @@ async function main() {
   let freshUrls = [];
   while (Date.now() < deadline) {
     await page.waitForTimeout(3000);
+    // 参数确认卡可能晚几秒才出现，没点中就再试
+    if (confirmState.indexOf("clicked") !== 0) {
+      const c = await tryConfirmVideoParams();
+      if (c !== "none") confirmState = c;
+    }
     const list = await videoUrls();
     const fresh = list.filter((s) => !before[s]);
     if (fresh.length) {
@@ -963,6 +999,7 @@ async function main() {
       convUrl: convUrl,
       pageTail: tail,
       params: params,
+      confirm: confirmState,
     });
     return;
   }
@@ -977,6 +1014,7 @@ async function main() {
     refs: REFS.length,
     pageTail: tail,
       params: params,
+      confirm: confirmState,
   });
 }
 
