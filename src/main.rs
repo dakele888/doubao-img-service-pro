@@ -721,6 +721,45 @@ fn route(stream: &mut TcpStream, req: Req) {
         return json_resp(stream, 200, &json!({ "ok": false, "error": "密码不对" }));
     }
 
+    // 视频任务队列：面板上要能看到「排队 / 生成中 / 完成 / 失败」，和生图那个队列一样
+    if m == "GET" && p == "/api/video/queue" {
+        let g = video_jobs().lock().unwrap_or_else(|e| e.into_inner());
+        let now = (util::now_ms() / 1000) as i64;
+        let items: Vec<Value> = g
+            .iter()
+            .rev()
+            .take(10)
+            .map(|j| {
+                json!({
+                    "id": j.id,
+                    "status": j.status,
+                    "progress": j.progress,
+                    "seconds": j.seconds,
+                    "size": j.size,
+                    "prompt": j.prompt.chars().take(60).collect::<String>(),
+                    "elapsed": (now - j.created_at).max(0),
+                    "error": j.error,
+                })
+            })
+            .collect();
+        let running = g.iter().filter(|j| j.status == "in_progress").count();
+        let queued = g.iter().filter(|j| j.status == "queued").count();
+        let done = g.iter().filter(|j| j.status == "completed").count();
+        let fail = g.iter().filter(|j| j.status == "failed").count();
+        drop(g);
+        return json_resp(
+            stream,
+            200,
+            &json!({
+                "running": running,
+                "queued": queued,
+                "done": done,
+                "fail": fail,
+                "items": items,
+            }),
+        );
+    }
+
     if m == "GET" && p == "/api/video/status" {
         let cfg = Config::load(&config_file());
         return json_resp(

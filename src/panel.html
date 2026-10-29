@@ -244,6 +244,15 @@ button.danger:hover{background:#fdf1f0}
 
     <div class="card">
       <div class="card-h2">
+        <h2>任务队列 <span class="stat" id="vidTaskStat"></span></h2>
+        <button class="pill" onclick="refreshVidTasks()">↻ 刷新</button>
+      </div>
+      <div id="vidTaskList"></div>
+      <div class="empty" id="vidTaskEmpty">还没有任务</div>
+    </div>
+
+    <div class="card">
+      <div class="card-h2">
         <h2>已生成视频 <span class="stat" id="vidCount"></span></h2>
         <button class="pill" onclick="refreshVideos()">↻ 刷新</button>
       </div>
@@ -638,6 +647,34 @@ function closeVideoView(){
   $('viewMain').style.display='';
   window.scrollTo(0,0);
 }
+function refreshVidTasks(){
+  api('/api/video/queue').then(function(d){
+    var list=$('vidTaskList'); if(!list) return;
+    var st=$('vidTaskStat');
+    if(st) st.textContent='（生成中 '+(d.running||0)+' · 排队 '+(d.queued||0)+' · 完成 '+(d.done||0)+' · 失败 '+(d.fail||0)+'）';
+    var items=d.items||[];
+    list.innerHTML=items.map(function(j){
+      var t = j.status==='completed' ? '<b style="color:#2f7d4f">完成</b>'
+            : j.status==='failed' ? '<b style="color:#b4453a">失败</b>'
+            : j.status==='in_progress' ? '<b style="color:#9a6b1f">生成中 '+(j.progress||0)+'%</b>'
+            : '<b style="color:#4a6b8a">排队</b>';
+      var err = (j.status==='failed' && j.error) ? '<div style="color:#b4453a;font-size:12px;margin-top:2px">'+esc(String(j.error).slice(0,150))+'</div>' : '';
+      return '<div class="kv" style="flex-direction:column;align-items:flex-start;gap:2px">'
+        + '<div>'+t+' · 时长 '+(j.seconds||'?')+'s · 比例 '+esc(j.size||'-')+' · 已等 '+(j.elapsed||0)+'s</div>'
+        + '<div style="color:#7b8a82;font-size:12px">'+esc(String(j.prompt||'').replace(/\n/g,' ').slice(0,80))+'</div>'
+        + err + '</div>';
+    }).join('');
+    var emp=$('vidTaskEmpty');
+    if(emp) emp.style.display=items.length?'none':'block';
+  }).catch(function(){});
+}
+function tickVidTasks(){
+  var v=$('viewVideo');
+  if(v && v.style.display!=='none') refreshVidTasks();
+  setTimeout(tickVidTasks,2000);
+}
+tickVidTasks();
+
 function refreshVideos(){
   api('/api/images').then(function(d){
     var list=(d.images||[]).filter(function(x){return /\.(mp4|webm)$/i.test(x.name)});

@@ -939,6 +939,7 @@ async function main() {
   let confirmState = "none";
   let confirmTries = 0;
   let coverState = "";
+  let pauseState = "";
   try {
     await page.click("css:.tiptap");
     await page.waitForTimeout(300);
@@ -997,10 +998,20 @@ async function main() {
       }
     } catch (e) {
       const msg = String((e && e.message) || e);
-      // 中途被人工接管会暂停自动化，拿回控制权后继续等
+      // 中途被人工接管时自动化会被暂停。先等用户交还（最多 3 分钟），
+      // 交还了就继续等视频；一直不交还再强制接管。
       if (/with the user|handOff|stopForUserControl/i.test(msg)) {
-        try { await takeOverTaskSpace(task.spaceId); } catch (e2) {}
-        await page.waitForTimeout(1500);
+        pauseState = "control-wait";
+        let back = false;
+        try {
+          await task.waitForControl({ timeout: 180000 });
+          back = true;
+        } catch (e2) {}
+        if (!back) {
+          try { await takeOverTaskSpace(task.spaceId); } catch (e3) {}
+        }
+        pauseState = back ? "control-resumed" : "control-forced";
+        await page.waitForTimeout(1200);
         continue;
       }
       throw e;
