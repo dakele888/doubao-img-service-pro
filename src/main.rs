@@ -489,6 +489,9 @@ fn route(stream: &mut TcpStream, req: Req) {
         if let Some(x) = v.get("requirePassword").and_then(|x| x.as_bool()) {
             cfg.require_password = x;
         }
+        if let Some(x) = v.get("rawImage").and_then(|x| x.as_bool()) {
+            cfg.raw_image = x;
+        }
         cfg.save(&config_file());
         let od = out_dir(&cfg);
         let _ = std::fs::create_dir_all(&od);
@@ -821,7 +824,7 @@ fn produce_image(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failu
 
     let mut last: Option<Value> = None;
     for attempt in 1..=3 {
-        let script = ego::build_script(prompt, &cfg.page_label, &cfg.conversation_name, GEN_TIMEOUT_MS, refs);
+        let script = ego::build_script(prompt, &cfg.page_label, &cfg.conversation_name, GEN_TIMEOUT_MS, refs, cfg.raw_image);
         let r = ego::run(&bin, &script, Duration::from_millis(GEN_TIMEOUT_MS));
         match r {
             Ok(v) => {

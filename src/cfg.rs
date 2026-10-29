@@ -16,6 +16,8 @@ pub struct Config {
     pub ego_path: String,
     /// 启动时是否需要输密码（面板里可以关掉）
     pub require_password: bool,
+    /// 无水印原图：抓到图后升级到 image_ori_raw 档（关掉就用列表给的地址，省几秒）
+    pub raw_image: bool,
 }
 
 impl Default for Config {
@@ -31,6 +33,7 @@ impl Default for Config {
             direct_mode: false,
             ego_path: String::new(),
             require_password: true,
+            raw_image: true,
         }
     }
 }
@@ -59,6 +62,7 @@ impl Config {
                 .get("requirePassword")
                 .and_then(|x| x.as_bool())
                 .unwrap_or(d.require_password),
+            raw_image: v.get("rawImage").and_then(|x| x.as_bool()).unwrap_or(d.raw_image),
         }
     }
 
@@ -74,6 +78,7 @@ impl Config {
             "directMode": self.direct_mode,
             "egoPath": self.ego_path,
             "requirePassword": self.require_password,
+            "rawImage": self.raw_image,
         })
     }
 

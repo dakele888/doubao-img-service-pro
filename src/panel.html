@@ -129,6 +129,11 @@ button.danger:hover{background:#fdf1f0}
     <label class="chk"><input type="checkbox" id="directMode" onchange="onDirect()"> 不落盘，直接返回豆包原始地址</label>
   </div>
   <div class="hint" id="directHint" style="margin-bottom:2px"></div>
+  <div class="row" style="margin-bottom:4px">
+    <label>图片档位</label>
+    <label class="chk"><input type="checkbox" id="rawImage" onchange="saveRaw()"> 无水印原图（默认开）</label>
+  </div>
+  <div class="hint" id="rawHint" style="margin-bottom:2px"></div>
   <div class="sep"></div>
   <div class="row">
     <label>缓存目录</label>
@@ -379,6 +384,8 @@ function load(){
     $('maxMB').value=d.cfg.maxMB;
     $('keepDays').value=d.cfg.keepDays;
     $('directMode').checked=!!d.cfg.directMode;
+    $('rawImage').checked=d.cfg.rawImage!==false;
+    applyRawHint();
     applyDirectUI();
     $('baseUrl').value=BASE+'/v1';
     renderPwd(d.cfg.requirePassword!==false);
@@ -442,9 +449,19 @@ function onDirect(){
     .then(function(){toast(on?'直传已开启':'直传已关闭');load()});
 }
 function saveCache(){
-  var b={outDir:$('outDir').value.trim(),maxFiles:+$('maxFiles').value||0,maxMB:+$('maxMB').value||0,keepDays:+$('keepDays').value||0};
+  var b={outDir:$('outDir').value.trim(),maxFiles:+$('maxFiles').value||0,maxMB:+$('maxMB').value||0,keepDays:+$('keepDays').value||0,rawImage:$('rawImage').checked};
   api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})
     .then(function(d){toast(d.ok?'已保存':'保存失败：'+d.error);load()});
+}
+// 原图档即时生效：改一下就存，不用点保存
+function saveRaw(){
+  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({rawImage:$('rawImage').checked})})
+    .then(function(d){toast(d.ok?(($('rawImage').checked?'已切换：无水印原图':'已切换：列表直出')+'，下次生成生效'):'保存失败：'+d.error)});
+}
+function applyRawHint(){
+  $('rawHint').textContent = $('rawImage').checked
+    ? '开启：抓到图后自动升级到无水印原图档（2048x2048 / 2848x1600，单张 2~5MB），偶尔要多花几秒。'
+    : '关闭：直接用豆包列表给的地址（384x216 缩略图档），最快。';
 }
 function cleanup(){api('/api/cleanup',{method:'POST'}).then(function(d){toast('清理了 '+d.removed.length+' 张');load()})}
 function clearAll(){if(!confirm('清空缓存目录里的所有图片？'))return;api('/api/clear',{method:'POST'}).then(function(d){toast('已清空 '+d.removed+' 张');load()})}

@@ -20,6 +20,7 @@ pub fn build_script(
     conv_name: &str,
     gen_timeout_ms: u64,
     refs: &[RefImage],
+    want_raw: bool,
 ) -> String {
     let prompt_json = serde_json::to_string(prompt).unwrap_or_else(|_| "\"\"".into());
     let page_json = serde_json::to_string(page_label).unwrap_or_else(|_| "\"p2\"".into());
@@ -35,6 +36,7 @@ pub fn build_script(
     .unwrap_or_else(|_| "[]".into());
 
     TPL.replace("@@SPACE@@", SPACE)
+        .replace("@@RAW@@", if want_raw { "1" } else { "0" })
         .replace("@@MARK@@", MARK)
         .replace("@@PROMPT@@", &prompt_json)
         .replace("@@PAGE@@", &page_json)
@@ -45,6 +47,7 @@ pub fn build_script(
 
 const TPL: &str = r##"
 const task = await taskSpace("@@SPACE@@");
+const WANT_RAW = "@@RAW@@" === "1";
 const PROMPT = @@PROMPT@@;
 const PAGE_LABEL = @@PAGE@@;
 const CONV_NAME = @@NAME@@;
@@ -403,7 +406,7 @@ async function main() {
     }
     let upgraded = null;
     let rawDbg = null;
-    if (hit) {
+    if (hit && WANT_RAW) {
       const key = (hit.split("?")[0].split("/").pop() || "").split("~")[0];
       if (key) {
         let r = await findRaw(key);
