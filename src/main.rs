@@ -716,6 +716,29 @@ fn route(stream: &mut TcpStream, req: Req) {
         );
     }
 
+    // 客户端（如魔哈）在正式生成前会先探测接口是否可用。
+    // 返回 200 + 明确的成功标记，字段多塞几个，不同客户端认哪个都能过。
+    if p == "/v1/videos/connection-test" || p == "/v1/videos/health" {
+        return json_resp(
+            stream,
+            200,
+            &json!({
+                "ok": true,
+                "success": true,
+                "status": "ok",
+                "object": "video",
+                "id": "connection-test",
+                "message": "ok",
+                "data": {
+                    "ok": true,
+                    "success": true,
+                    "status": "ok",
+                    "id": "connection-test"
+                }
+            }),
+        );
+    }
+
     if m == "POST" && p == "/v1/videos/generations" {
         return generate_video(stream, &req);
     }
