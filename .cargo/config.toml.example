@@ -1,0 +1,8 @@
+# 复制成 config.toml 后，把 linker 改成你自己机器上的 rust-lld 路径。
+# 只有 x86_64-pc-windows-gnu 工具链需要：默认的 ld.exe 缺失时要指定 rust-lld。
+# MSVC 工具链直接删掉这个文件即可。
+[target.x86_64-pc-windows-gnu]
+linker = "C:\\Users\\<你的用户名>\\.rustup\\toolchains\\stable-x86_64-pc-windows-gnu\\lib\\rustlib\\x86_64-pc-windows-gnu\\bin\\rust-lld.exe"
+
+[build]
+incremental = false

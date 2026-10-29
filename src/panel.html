@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>豆包生图服务</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f4f6f5;color:#1f2a24;font:13px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+.wrap{max-width:900px;margin:0 auto;padding:12px 14px 28px}
+h1{font-size:15px;margin:0 0 2px}
+.sub{color:#7b8a82;font-size:11.5px;margin-bottom:10px}
+.card{background:#fff;border:1px solid #e2e8e4;border-radius:9px;padding:11px 13px;margin-bottom:10px}
+.card h2{font-size:13px;margin:0 0 9px;font-weight:600;color:#2c3a32}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:7px}
+.row>label{width:78px;color:#4c5a53;font-size:12.5px;flex:0 0 auto}
+.row>label.chk{width:auto;flex:1 1 auto;min-width:0}
+input[type=text],input[type=number]{border:1px solid #d3ddd7;border-radius:6px;padding:5px 8px;font-size:12.5px;font-family:inherit;background:#fbfcfb}
+input[type=text]{flex:1;min-width:180px}
+input[type=number]{width:84px}
+.hint{color:#8a978f;font-size:12px}
+button{border:1px solid #cfdad4;background:#fff;color:#2c3a32;border-radius:6px;padding:5px 11px;font-size:12.5px;font-family:inherit;cursor:pointer}
+button:hover{background:#f2f6f3}
+button.primary{background:#2f6b3f;border-color:#2f6b3f;color:#fff}
+button.primary:hover{background:#285c36}
+button.danger{color:#a93a33;border-color:#e6c9c6}
+button.danger:hover{background:#fdf1f0}
+.kv{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;color:#4c5a53}
+.kv b{color:#1f2a24;font-weight:600}
+.kv .run{color:#2f6b3f;font-weight:600}
+.kv .wait{color:#a8641b;font-weight:600}
+.stat{font-size:13px;color:#4c5a53}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px;margin-top:4px}
+.ph{border:1px solid #e2e8e4;border-radius:8px;overflow:hidden;background:#fbfcfb;position:relative}
+.ph img{width:100%;height:82px;object-fit:cover;display:block;background:#eef2ef}
+.ph .m{padding:5px 7px;font-size:11px;color:#7b8a82;display:flex;justify-content:space-between;gap:4px}
+.ph .x{position:absolute;top:5px;right:5px;background:rgba(0,0,0,.55);color:#fff;border:0;border-radius:5px;width:20px;height:20px;line-height:18px;padding:0;font-size:12px;cursor:pointer}
+.empty{color:#93a099;font-size:13px;padding:10px 0}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#2c3a32;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;opacity:0;transition:.2s;pointer-events:none}
+.toast.on{opacity:1}
+.sep{border-top:1px dashed #e4ebe7;margin:9px 0}
+.chk{display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12.5px;color:#3d4a43}
+.chk input{width:auto;margin:0}
+.off{opacity:.5}
+.doc{border-top:1px solid #eef2ef;padding:5px 0}
+.doc:first-of-type{border-top:0;padding-top:0}
+.doc summary{cursor:pointer;font-size:12.5px;color:#2c3a32;font-weight:600;padding:4px 0;list-style:none;outline:none}
+.doc summary::-webkit-details-marker{display:none}
+.doc summary:before{content:"▸";display:inline-block;width:15px;color:#8a978f;font-weight:400}
+.doc[open] summary:before{content:"▾"}
+.doc ol,.doc ul{margin:4px 0 6px 16px;padding:0;font-size:12.5px;color:#4c5a53;line-height:1.8}
+.doc p{margin:5px 0;font-size:12.5px;color:#4c5a53;line-height:1.75}
+.doc code{background:#f1f6f2;padding:1px 5px;border-radius:4px;font-size:11.5px;color:#2f6b3f;word-break:break-all}
+.doc table{width:100%;border-collapse:collapse;font-size:12.5px;margin:4px 0}
+.doc td{padding:4px 6px;border-bottom:1px solid #f2f5f3;color:#4c5a53;vertical-align:top;line-height:1.6}
+.doc td:first-child{width:36%;color:#2c3a32}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.topbar h1{margin:0}
+.help-btn{font-size:12px;padding:4px 11px;border-color:#c8d6ce;color:#2f6b3f}
+.top-actions{display:flex;align-items:center;gap:8px}
+.pill{font-size:12px;padding:4px 12px;border-radius:999px;border:1px solid #bcd6c4;background:#f2f8f4;color:#1f7a4d;cursor:pointer;font-weight:600}
+.pill:hover{background:#e8f3ec}
+.pill.off{border-color:#e2d2b8;background:#fdf8f1;color:#a0703a}
+.pill.off:hover{background:#faf0e2}
+.help-btn:hover{background:#f1f6f2}
+.modal{position:fixed;inset:0;background:rgba(22,32,27,.45);display:none;align-items:center;justify-content:center;padding:20px;z-index:60}
+.modal.on{display:flex}
+.modal-box{background:#fff;border-radius:12px;width:100%;max-width:660px;max-height:86vh;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.2)}
+.modal-head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #eef2ef;font-size:13.5px;font-weight:600;color:#2c3a32}
+.mclose{width:26px;height:26px;padding:0;line-height:1;font-size:16px;color:#7b8a82;border-color:#e3eae6}
+.mclose:hover{background:#f4f7f5;color:#2c3a32}
+.modal-body{overflow:auto;padding:10px 16px 16px}
+.modal-body .doc summary{font-size:13px}
+</style></head><body><div class="wrap">
+<div class="topbar">
+  <h1>豆包生图服务</h1>
+  <div class="top-actions">
+    <button id="pwdToggle" class="pill" onclick="togglePwd()" title="开启后每次启动都要输密码；改完下次启动生效">启动密码 · 开</button>
+    <button class="help-btn" onclick="openEgo()">ego 官网</button>
+    <button class="help-btn" onclick="openHelp()">部署帮助</button>
+  </div>
+</div>
+<div class="sub">把网页版豆包当作 OpenAI 兼容的生图接口 · 本机运行</div>
+
+<div class="card">
+  <h2>状态</h2>
+  <div class="kv" id="status">加载中…</div>
+  <div class="kv" id="qline" style="margin-top:6px"></div>
+  <div class="sep"></div>
+  <div class="sep"></div>
+  <div class="row">
+    <label>接口地址</label>
+    <input type="text" id="baseUrl" readonly>
+    <button onclick="copyBase()">复制</button>
+  </div>
+  <div class="sep"></div>
+  <div class="row">
+    <label>ego 环境</label>
+    <input type="text" id="egoPath" placeholder="留空 = 自动查找">
+    <button onclick="saveEgo()">检测</button>
+  </div>
+  <div class="hint" id="egoHint" style="margin:0 0 10px;word-break:break-all"></div>
+  <div class="hint">魔哈里选「自定义生图接口」，Base URL 填上面这个，API Key / 模型名随便填。<b>并发数填几都行</b>——豆包页签只有一个，服务内部自动排队，不会互相抢图。</div>
+</div>
+
+<div class="card">
+  <h2>对话</h2>
+  <div class="row">
+    <label>专用对话名</label>
+    <input type="text" id="convName" placeholder="生图专用">
+    <button class="primary" onclick="saveConv()">保存</button>
+  </div>
+  <div class="hint">有这个名字的对话就一直复用它；没有就自动新建一条，生成完自动改名。留空则每次新建。</div>
+  <div class="sep"></div>
+  <div class="row">
+    <label>当前对话地址</label>
+    <input type="text" id="convUrl" readonly>
+    <button onclick="resetConv()">解绑</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>缓存</h2>
+  <div class="row" style="margin-bottom:4px">
+    <label>直传模式</label>
+    <label class="chk"><input type="checkbox" id="directMode" onchange="onDirect()"> 不落盘，直接返回豆包原始地址</label>
+  </div>
+  <div class="hint" id="directHint" style="margin-bottom:2px"></div>
+  <div class="sep"></div>
+  <div class="row">
+    <label>缓存目录</label>
+    <input type="text" id="outDir" placeholder="留空 = 程序目录\out">
+    <button onclick="reveal()">打开目录</button>
+  </div>
+  <div class="row">
+    <label>最多保留</label>
+    <input type="number" id="maxFiles" min="0" step="10"> <span class="hint">张（0 = 不限）</span>
+  </div>
+  <div class="row">
+    <label>最大占用</label>
+    <input type="number" id="maxMB" min="0" step="128"> <span class="hint">MB（0 = 不限）</span>
+  </div>
+  <div class="row">
+    <label>保留天数</label>
+    <input type="number" id="keepDays" min="0" step="1"> <span class="hint">天（0 = 不限）</span>
+  </div>
+  <div class="row" style="margin-top:4px">
+    <button class="primary" onclick="saveCache()">保存缓存设置</button>
+    <button onclick="cleanup()">立即清理</button>
+    <button class="danger" onclick="clearAll()">清空全部</button>
+  </div>
+  <div class="hint">每次生成后自动按上面的规则清理，从最旧的开始删。</div>
+</div>
+
+<div class="card">
+  <h2>已缓存图片 <span class="stat" id="stat"></span></h2>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="empty" style="display:none">还没有图片</div>
+</div>
+
+</div>
+
+<div class="modal" id="helpModal" onclick="if(event.target===this)closeHelp()">
+<div class="modal-box">
+<div class="modal-head"><span>部署帮助</span><button class="mclose" onclick="closeHelp()">×</button></div>
+<div class="modal-body">
+
+  <details class="doc" open>
+    <summary>第一次用：三步跑起来</summary>
+    <ol>
+      <li>装 <b>ego lite</b>（<code>https://lite.ego.app</code>，选 Windows 版），装完在里面打开 <code>doubao.com</code> 扫码登录豆包，随便发一句话确认能回复。</li>
+      <li>把 <code>豆包生图服务.exe</code> 放进一个普通文件夹（比如 <code>D:\豆包生图\</code>）。<b>别放桌面、别放 Program Files</b>，那里写缓存没权限。</li>
+      <li>双击运行：先勾选<b>免责声明</b>，再输入<b>启动密码</b>（出厂密码见 README），面板才会弹出来。看上面「状态」里 ego 是不是绿色<b>可用</b>；红色就点「检测」，还不行把 <code>ego-browser.exe</code> 完整路径填进去。</li>
+    </ol>
+    <p>不想每次输密码：面板「状态」里点「启动密码 → 关闭」，下次启动就只显示免责声明。<br>点面板右上角的 <b>×</b> 不是退出，而是<b>收进系统托盘，服务继续运行</b>，魔哈随时能调。要重新打开面板：双击托盘图标，或者再双击一次 exe。<br>托盘图标可能被折叠在任务栏右下角的 <b>∧</b> 里，可以拖出来固定。<b>真正停止服务</b>要在托盘图标上点右键 → 退出。</p>
+  </details>
+
+  <details class="doc">
+    <summary>接到魔哈里</summary>
+    <p>魔哈工作台 → 生图设置 → 提供商选「自定义生图接口」：</p>
+    <table>
+      <tr><td>Base URL</td><td><code>http://127.0.0.1:8788/v1</code></td></tr>
+      <tr><td>API Key</td><td>随便填，比如 <code>x</code>（不校验）</td></tr>
+      <tr><td>模型名</td><td>随便填，比如 <code>doubao</code>（忽略）</td></tr>
+      <tr><td>并发数</td><td><b>1</b>。填大了也不会串图，服务内部排队，但最后几张要等很久</td></tr>
+    </table>
+    <p>填完先手动跑一张。第一张慢一点（约 30 秒），稳定后每张 18~26 秒，大约 2.7 张/分钟。</p>
+  </details>
+
+  <details class="doc">
+    <summary>常见问题</summary>
+    <table>
+      <tr><td>返回 401 豆包还没登录</td><td>到 ego lite 里重新登录 <code>doubao.com</code>，再重试</td></tr>
+      <tr><td>启动 ego-browser 失败</td><td>ego lite 没装，或装在非默认位置。按上面第三步填路径</td></tr>
+      <tr><td>进不到图像生成模式</td><td>豆包页面改版了，看 <code>service.log</code> 后联系维护的人</td></tr>
+      <tr><td>等待超时，没抓到图</td><td>豆包卡住或被限流，重试一次通常就好</td></tr>
+      <tr><td>双击没反应</td><td>已经有一个实例在跑了，看任务栏有没有面板窗口</td></tr>
+      <tr><td>图片在哪</td><td>exe 同目录的 <code>out\</code>，面板里也能直接打开</td></tr>
+    </table>
+    <p>详细日志在 exe 同目录的 <code>service.log</code>，超过 1MB 自动轮转。</p>
+  </details>
+
+  <details class="doc">
+    <summary>它是怎么工作的 / 有哪些限制</summary>
+    <p>面板背后是个本机小服务：收到生图请求后，用 <code>ego-browser</code> 驱动你已登录的豆包页面，点「图像生成」、填提示词、回车，然后轮询抓新出现的图，下载到本地再返回地址。所以它<b>完全走你自己的豆包账号</b>，不需要任何 API Key。</p>
+    <table>
+      <tr><td>出图带水印</td><td>网页版豆包本身的水印，去不掉</td></tr>
+      <tr><td>依赖页面结构</td><td>豆包改版就可能失效，需要更新脚本</td></tr>
+      <tr><td>别高频刷</td><td>是自动化操作个人账号，太快有风控风险</td></tr>
+      <tr><td>只能本机用</td><td>只监听 <code>127.0.0.1</code>，局域网其他机器访问不到</td></tr>
+      <tr><td>要一直开机</td><td>电脑睡眠或关机，服务就断了</td></tr>
+    </table>
+  </details>
+</div>
+</div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+var BASE = /^https?:/.test(location.origin||'') ? location.origin : 'http://127.0.0.1:8788';
+function $(id){return document.getElementById(id)}
+function toast(t){var e=$('toast');e.textContent=t;e.classList.add('on');setTimeout(function(){e.classList.remove('on')},1600)}
+function fmt(n){if(n<1024)return n+' B';if(n<1048576)return (n/1024).toFixed(0)+' KB';return (n/1048576).toFixed(1)+' MB'}
+function copyBase(){var v=$('baseUrl').value;navigator.clipboard&&navigator.clipboard.writeText(v);toast('已复制 '+v)}
+function openHelp(){$('helpModal').classList.add('on')}
+function closeHelp(){$('helpModal').classList.remove('on')}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeHelp()});
+function saveEgo(){
+  var v=$('egoPath').value.trim();
+  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({egoPath:v})})
+    .then(function(r){
+      if(!r.ok){$('egoHint').innerHTML='<span style="color:#a93a33">'+esc(r.error||'保存失败')+'</span>';return;}
+      return api('/api/checkego').then(function(d){
+        $('egoHint').innerHTML = d.ok
+          ? '可用 · <span style="color:#7b8a82">'+esc(d.bin)+'</span>'
+          : '<span style="color:#a93a33">还是不可用：确认 ego lite 已安装，且路径指向 ego-browser.exe。</span>';
+        toast(d.ok?'ego 可用':'没找到 ego');
+      });
+    });
+}
+function api(p,opt){return fetch(BASE+p,opt||{}).then(function(r){return r.json()})}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function renderQueue(q){
+  if(!q)return;
+  var el=$('qline');if(!el)return;
+  var p=[];
+  if(q.running)p.push('<span class="run">生成中 #'+q.running.seq+' · '+q.running.elapsed+'s · '+esc(q.running.prompt)+'</span>');
+  else p.push('<span>空闲</span>');
+  if(q.waitingCount)p.push('<span class="wait">排队 '+q.waitingCount+' 个</span>');
+  p.push('<span>成功 <b>'+q.done+'</b> · 失败 <b>'+q.fail+'</b></span>');
+  if(q.lastCost)p.push('<span>上一张 '+q.lastCost+'s</span>');
+  el.innerHTML=p.join('');
+}
+function tickQueue(){
+  api('/api/queue').then(function(q){renderQueue(q)}).catch(function(){});
+  setTimeout(tickQueue,2000);
+}
+function renderPwd(on){
+  var b=document.getElementById('pwdToggle');
+  if(!b) return;
+  b.textContent='启动密码 · '+(on?'开':'关');
+  if(on) b.classList.remove('off'); else b.classList.add('off');
+}
+function togglePwd(){
+  var on = !document.getElementById('pwdToggle').classList.contains('off');
+  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({requirePassword:!on})})
+    .then(function(r){
+      if(r && r.ok===false){ toast(r.error||'保存失败'); return; }
+      renderPwd(!on);
+      toast(on?'启动密码已关闭，下次启动直接进入':'启动密码已开启，下次启动需要输入');
+    }).catch(function(){ toast('保存失败'); });
+}
+function openEgo(){
+  api('/api/ego',{method:'POST'})
+    .then(function(r){ toast(r && r.ok===false ? (r.error||'打开失败') : '已用默认浏览器打开 ego 官网'); })
+    .catch(function(){ toast('打开失败'); });
+}
+function load(){
+  api('/api/config').then(function(d){
+    $('convName').value=d.cfg.conversationName||'';
+    $('convUrl').value=d.cfg.conversationUrl||'';
+    $('outDir').value=d.cfg.outDir||'';
+    $('maxFiles').value=d.cfg.maxFiles;
+    $('maxMB').value=d.cfg.maxMB;
+    $('keepDays').value=d.cfg.keepDays;
+    $('directMode').checked=!!d.cfg.directMode;
+    applyDirectUI();
+    $('baseUrl').value=BASE+'/v1';
+    renderPwd(d.cfg.requirePassword!==false);
+    $('status').innerHTML=
+      '<span>缓存目录 <b>'+d.outDir+'</b></span>'+
+      '<span>已缓存 <b>'+d.stat.count+'</b> 张 / <b>'+fmt(d.stat.bytes)+'</b></span>'+
+      '<span>ego <b style="color:'+(d.ego?'#2f6b3f':'#a93a33')+'">'+(d.ego?'可用':'未找到')+'</b></span>';
+    $('egoPath').value=d.cfg.egoPath||'';
+    $('egoHint').innerHTML = d.ego
+      ? '可用 · <span style="color:#7b8a82">'+esc(d.egoBin)+'</span>'
+      : '<span style="color:#a93a33">没找到 ego-browser。先装 ego lite（ego-browser 是它的一部分），装完点右边「检测」；装到非默认位置就在这里填完整路径。</span>';
+    $('stat').textContent = d.cfg.directMode ? '（直传模式，不缓存）' : '（'+d.stat.count+' 张，'+fmt(d.stat.bytes)+'）';
+    renderQueue(d.queue);
+    var g=$('grid');g.innerHTML='';
+    $('empty').style.display=d.images.length?'none':'block';
+    d.images.forEach(function(it){
+      var w=document.createElement('div');w.className='ph';
+      w.innerHTML='<img src="'+BASE+'/files/'+it.name+'" loading="lazy">'+
+        '<button class="x" title="删除">×</button>'+
+        '<div class="m"><span>'+fmt(it.size)+'</span><span>'+new Date(it.mtime).toLocaleTimeString('zh-CN',{hour12:false})+'</span></div>';
+      w.querySelector('.x').onclick=function(){del(it.name)};
+      g.appendChild(w);
+    });
+  });
+}
+function saveConv(){
+  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({conversationName:$('convName').value.trim()})})
+    .then(function(){toast('已保存');load()});
+}
+function resetConv(){
+  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({conversationUrl:''})})
+    .then(function(){toast('已解绑，下次重新找对话');load()});
+}
+function applyDirectUI(){
+  var on=$('directMode').checked;
+  ['outDir','maxFiles','maxMB','keepDays'].forEach(function(id){$(id).disabled=on});
+  $('directHint').textContent = on
+    ? '已开启：图片不下载到本地，魔哈拿到的是豆包原始地址。实测无需 Cookie 可下、带跨域头、签名有效到 2036 年。下面的缓存设置暂不生效。'
+    : '关闭时图片下载到缓存目录，魔哈拿到的是本机地址，最稳。';
+}
+function onDirect(){
+  var on=$('directMode').checked;
+  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({directMode:on})})
+    .then(function(){toast(on?'直传已开启':'直传已关闭');load()});
+}
+function saveCache(){
+  var b={outDir:$('outDir').value.trim(),maxFiles:+$('maxFiles').value||0,maxMB:+$('maxMB').value||0,keepDays:+$('keepDays').value||0};
+  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})
+    .then(function(d){toast(d.ok?'已保存':'保存失败：'+d.error);load()});
+}
+function cleanup(){api('/api/cleanup',{method:'POST'}).then(function(d){toast('清理了 '+d.removed.length+' 张');load()})}
+function clearAll(){if(!confirm('清空缓存目录里的所有图片？'))return;api('/api/clear',{method:'POST'}).then(function(d){toast('已清空 '+d.removed+' 张');load()})}
+function del(n){api('/api/delete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:n})}).then(function(){load()})}
+function reveal(){api('/api/reveal',{method:'POST'}).then(function(){toast('已打开目录')})}
+load();
+tickQueue();
+if(location.hash==='#help')openHelp();
+// 心跳：面板开着时每分钟报一次，仅用于状态显示
+(function beat(){ fetch(BASE+'/api/ping').catch(function(){}); setTimeout(beat, 60000); })();
+</script></body></html>

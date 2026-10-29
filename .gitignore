@@ -1,0 +1,21 @@
+# 构建产物
+/target/
+/dist/
+*.exe
+*.pdb
+
+# 本机构建配置（含绝对路径，换机器要自己改）
+/.cargo/config.toml
+
+# 运行期数据，不进仓库
+/config.json
+/service.log
+/service.old.log
+/out/
+/.webview/
+/.win/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
