@@ -37,6 +37,17 @@ button.danger:hover{background:#fdf1f0}
 .empty{color:#93a099;font-size:13px;padding:10px 0}
 .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#2c3a32;color:#fff;padding:9px 16px;border-radius:8px;font-size:13px;opacity:0;transition:.2s;pointer-events:none}
 .toast.on{opacity:1}
+/* 更新进度覆盖层 */
+.upd-mask{position:fixed;inset:0;background:rgba(15,22,18,.55);display:none;align-items:center;justify-content:center;z-index:99}
+.upd-mask.on{display:flex}
+.upd-box{background:#fff;border-radius:14px;padding:30px 38px;width:340px;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+.upd-spin{width:44px;height:44px;margin:0 auto 16px;border-radius:50%;border:4px solid #dce5df;border-top-color:#2f7d4f;animation:updspin .9s linear infinite}
+.upd-box.err .upd-spin{display:none}
+@keyframes updspin{to{transform:rotate(360deg)}}
+.upd-title{font-size:15px;font-weight:700;color:#1d2b22;margin-bottom:8px}
+.upd-msg{font-size:13px;color:#5c6b62;min-height:18px;word-break:break-all}
+.upd-btn{margin-top:18px;padding:7px 22px;border:1px solid #c9d4cc;border-radius:8px;background:#f4f7f5;color:#1d2b22;font-size:13px;cursor:pointer;display:none}
+.upd-box.err .upd-btn{display:inline-block}
 .sep{border-top:1px dashed #e4ebe7;margin:9px 0}
 .chk{display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12.5px;color:#3d4a43}
 .chk input{width:auto;margin:0}
@@ -244,6 +255,12 @@ button.danger:hover{background:#fdf1f0}
 </div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="upd-mask" id="updMask"><div class="upd-box" id="updBox">
+  <div class="upd-spin"></div>
+  <div class="upd-title" id="updTitle">正在更新</div>
+  <div class="upd-msg" id="updMsg">准备开始…</div>
+  <button class="upd-btn" onclick="updClose()">关 闭</button>
+</div></div>
 <script>
 var BASE = /^https?:/.test(location.origin||'') ? location.origin : 'http://127.0.0.1:8788';
 function $(id){return document.getElementById(id)}
@@ -301,7 +318,8 @@ function renderVer(d){
 function checkVer(manual){
   var b=document.getElementById('verBtn');
   if(manual&&b) b.textContent='检查中…';
-  api('/api/version').then(function(d){
+  // 手动点击强制跳过服务端缓存，立刻查 Gitee
+  api(manual?'/api/version?force=1':'/api/version').then(function(d){
     renderVer(d);
     if(manual) toast(d.hasUpdate?('发现新版本 v'+d.latest):('已是最新版本 v'+d.current));
   }).catch(function(){
@@ -322,6 +340,7 @@ function waitRestart(target){
   },2000);
 }
 function afterRestart(ok){
+  updClose();
   if(ok){
     toast('更新完成，页面刷新中');
     location.reload();
@@ -331,29 +350,69 @@ function afterRestart(ok){
     if(b){b.textContent='请手动启动';b.classList.add('upd');}
   }
 }
+// ---- 更新覆盖层：POST 立刻返回，轮询 /api/update/status 显示各阶段 ----
+var UPD_POLL=null;
+function updShow(title,msg){
+  var m=document.getElementById('updMask'),box=document.getElementById('updBox');
+  if(!m) return;
+  box.classList.remove('err');
+  document.getElementById('updTitle').textContent=title;
+  document.getElementById('updMsg').textContent=msg||'';
+  m.classList.add('on');
+}
+function updStage(s,msg){
+  var box=document.getElementById('updBox');
+  if(s===9){
+    clearInterval(UPD_POLL);UPD_POLL=null;
+    box.classList.add('err');
+    document.getElementById('updTitle').textContent='更新失败';
+    document.getElementById('updMsg').textContent=msg;
+    renderVer();
+  }else if(s===6){
+    clearInterval(UPD_POLL);UPD_POLL=null;
+    box.classList.add('err');
+    document.getElementById('updTitle').textContent='已是最新';
+    document.getElementById('updMsg').textContent=msg;
+    renderVer();
+  }else{
+    document.getElementById('updMsg').textContent=msg||'…';
+  }
+}
+function updClose(){
+  clearInterval(UPD_POLL);UPD_POLL=null;
+  document.getElementById('updMask').classList.remove('on');
+}
+function pollUpd(){
+  fetch('/api/update/status').then(function(r){return r.json()}).then(function(d){
+    updStage(d.stage,d.msg);
+    // 旧进程退出前的最后阶段：转等新进程
+    if(d.stage===5){
+      clearInterval(UPD_POLL);UPD_POLL=null;
+      document.getElementById('updTitle').textContent='重启中';
+      waitRestart(VER.latest);
+    }
+  }).catch(function(){
+    // 状态接口断了：多半是旧进程正在退出，转等新进程
+    clearInterval(UPD_POLL);UPD_POLL=null;
+    waitRestart(VER.latest);
+  });
+}
 function doUpdate(){
   var b=document.getElementById('verBtn');
   if(!b) return;
-  if(!confirm('更新到 v'+VER.latest+'？\n\n会下载新版本（约 800 KB）替换当前 exe 并自动重启服务，一般 10~60 秒。')) return;
-  b.textContent='下载中…';
+  if(!confirm('更新到 v'+VER.latest+'？\n\n会下载新版本替换当前 exe 并自动重启服务，一般 10~60 秒。')) return;
+  updShow('正在更新','正在启动…');
   b.disabled=true;
   fetch('/api/update',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
-    b.disabled=false;
-    if(d.ok&&d.restarting){
-      toast('已更新到 v'+d.latest+'，正在重启…');
-      b.textContent='重启中…';
-      waitRestart(d.latest);
-    }else if(d.ok){
-      toast('已经是最新版本 v'+(d.current||VER.current));
-      renderVer();
-    }else{
-      toast('更新失败：'+((d.error&&d.error.message)||d.error||'未知错误'));
-      renderVer();
+    if(!d.ok){
+      updStage(9,(d.error&&d.error.message)||'启动失败');
+      b.disabled=false;
+      return;
     }
-  }).catch(function(){
+    UPD_POLL=setInterval(pollUpd,700);
+  }).catch(function(e){
+    updStage(9,'请求失败：'+e);
     b.disabled=false;
-    toast('请求中断，稍等几秒刷新页面看看是否已在重启');
-    setTimeout(function(){location.reload();},5000);
   });
 }
 function verClick(){

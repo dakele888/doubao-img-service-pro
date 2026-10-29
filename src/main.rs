@@ -262,6 +262,7 @@ const MAX_BODY: usize = 64 * 1024 * 1024;
 struct Req {
     method: String,
     path: String,
+    query: String,
     body: Vec<u8>,
     ctype: String,
 }
@@ -285,6 +286,11 @@ fn handle(mut stream: TcpStream) {
         return;
     }
     let path = full.split('?').next().unwrap_or("/").to_string();
+    let query = full
+        .splitn(2, '?')
+        .nth(1)
+        .unwrap_or("")
+        .to_string();
 
     let mut content_length = 0usize;
     let mut ctype = String::new();
@@ -323,7 +329,7 @@ fn handle(mut stream: TcpStream) {
         read_fixed(&mut reader, content_length)
     };
 
-    let req = Req { method, path, body, ctype };
+    let req = Req { method, path, query, body, ctype };
     route(&mut stream, req);
 }
 
@@ -562,9 +568,11 @@ fn route(stream: &mut TcpStream, req: Req) {
     }
 
     // 用系统默认浏览器打开 ego 官网文档（URL 写死，不接受外部传入）
+    // 手动点“检查更新”带 ?force=1，跳过 10 分钟缓存立刻查 Gitee
     if m == "GET" && p == "/api/version" {
+        let force = req.query.split('&').any(|kv| kv == "force=1");
         let current = env!("CARGO_PKG_VERSION").to_string();
-        let rel = latest_release();
+        let rel = latest_release(force);
         let has = rel.as_ref().map(|r| is_newer(&r.tag, &current)).unwrap_or(false);
         return json_resp(
             stream,
@@ -579,26 +587,22 @@ fn route(stream: &mut TcpStream, req: Req) {
         );
     }
 
-    // 一键更新：下载新版 exe 替换自己并重启（返回 200 后本进程就退出了）
+    // 一键更新：改成异步，接口立刻返回，下载/校验/替换的进度走 /api/update/status
     if m == "POST" && p == "/api/update" {
-        return match do_update() {
-            Ok(v) => {
-                let restart = v.get("restarting").and_then(|x| x.as_bool()).unwrap_or(false);
-                json_resp(stream, 200, &v);
-                if restart {
-                    webview::remove_tray();
-                    // 给新进程让位：本进程退出后端口就空出来了
-                    let _ = stream.flush();
-                    thread::sleep(Duration::from_millis(400));
-                    util::log("[更新] 旧进程退出");
-                    std::process::exit(0);
-                }
-            }
-            Err(e) => {
-                util::log(&format!("[更新] 失败：{}", e));
-                json_resp(stream, 200, &json!({ "ok": false, "error": { "message": e } }))
-            }
-        };
+        if upd_running() {
+            return json_resp(stream, 200, &json!({ "ok": true, "started": true, "running": true }));
+        }
+        if let Err(e) = upd_start() {
+            util::log(&format!("[更新] 启动失败：{}", e));
+            return json_resp(stream, 200, &json!({ "ok": false, "error": { "message": e } }));
+        }
+        return json_resp(stream, 200, &json!({ "ok": true, "started": true }));
+    }
+
+    // 更新进度：前端覆盖层轮询这个接口
+    if m == "GET" && p == "/api/update/status" {
+        let s = upd_status();
+        return json_resp(stream, 200, &json!({ "ok": true, "stage": s.0, "msg": s.1 }));
     }
 
     if m == "POST" && p == "/api/release" {
@@ -1465,13 +1469,15 @@ struct Release {
     url: String,
 }
 
-/// 查 Gitee 上最新发行版的 tag 和 exe 下载地址，10 分钟内复用缓存
-fn latest_release() -> Option<Release> {
+/// 查 Gitee 上最新发行版的 tag 和 exe 下载地址，10 分钟内复用缓存；force=true 跳过缓存直接查
+fn latest_release(force: bool) -> Option<Release> {
     let m = VER_CACHE.get_or_init(|| std::sync::Mutex::new(None));
-    if let Ok(g) = m.lock() {
-        if let Some((at, v)) = g.as_ref() {
-            if util::now_ms().saturating_sub(*at) < 10 * 60 * 1000 {
-                return v.clone();
+    if !force {
+        if let Ok(g) = m.lock() {
+            if let Some((at, v)) = g.as_ref() {
+                if util::now_ms().saturating_sub(*at) < 10 * 60 * 1000 {
+                    return v.clone();
+                }
             }
         }
     }
@@ -1516,8 +1522,11 @@ fn latest_release() -> Option<Release> {
             }
         }
     }
+    // 查到了就更新缓存；没查到时保留旧缓存，别让一次网络抖动把已知数据清掉
     if let Ok(mut g) = m.lock() {
-        *g = Some((util::now_ms(), rel.clone()));
+        if rel.is_some() || g.as_ref().map(|(_, v)| v.is_none()).unwrap_or(true) {
+            *g = Some((util::now_ms(), rel.clone()));
+        }
     }
     rel
 }
@@ -1554,18 +1563,22 @@ fn shell_start(exe: &PathBuf) -> bool {
     h.0 as isize > 32
 }
 
-/// 一键更新：下新版 → 换掉自己 → 重启。返回给前端的只是执行结果，
-/// 真正重启由这里 spawn 出来，旧进程随即退出。
-fn do_update() -> Result<Value, String> {
+/// 一键更新：下新版 → 换掉自己 → 重启。
+/// report(阶段号, 文字) 把进度报出去（覆盖层轮询 /api/update/status 用）。
+/// 阶段：1 检查 / 2 下载 / 3 校验 / 4 替换 / 5 重启中 / 6 已最新 / 9 错误
+fn do_update(report: &dyn Fn(u8, &str)) -> Result<Value, String> {
     let cur = env!("CARGO_PKG_VERSION").to_string();
+    report(1, "正在检查最新版本…");
     *VER_CACHE.get_or_init(|| std::sync::Mutex::new(None)).lock().unwrap() = None; // 强制重查
-    let rel = latest_release().ok_or("查不到最新版本（网络不通或 Gitee 访问不了）")?;
+    let rel = latest_release(true).ok_or("查不到最新版本（网络不通或 Gitee 访问不了）")?;
     if !is_newer(&rel.tag, &cur) {
+        report(6, "已是最新版本");
         return Ok(json!({ "ok": true, "upToDate": true, "current": cur, "latest": rel.tag }));
     }
     if rel.url.is_empty() {
         return Err("最新版里没找到 exe 附件".into());
     }
+    report(2, &format!("发现 v{}，正在下载…", rel.tag));
 
     let exe = std::env::current_exe().map_err(|_| "拿不到本程序的路径")?;
     let dir = exe.parent().map(|p| p.to_path_buf()).ok_or("拿不到程序目录")?;
@@ -1573,6 +1586,7 @@ fn do_update() -> Result<Value, String> {
 
     util::log(&format!("[更新] 下载 v{}", rel.tag));
     let size = util::download(&rel.url, &tmp).map_err(|e| format!("下载失败：{}", e))?;
+    report(3, &format!("下载完成（{}），正在校验…", fmt_kb(size)));
     if size < 300 * 1024 {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("下载的文件不对（只有 {} 字节）", size));
@@ -1586,6 +1600,7 @@ fn do_update() -> Result<Value, String> {
         let _ = std::fs::remove_file(&tmp);
         return Err("下载下来的不是可执行文件（拿到的是网页或报错页）".into());
     }
+    report(4, "校验通过，正在替换程序…");
 
     // 当前 exe 在跑着，删不掉但能改名；改完把新版顶上去
     let stem = exe
@@ -1601,6 +1616,7 @@ fn do_update() -> Result<Value, String> {
         return Err(format!("换上新版本失败：{}", e));
     }
     util::log(&format!("[更新] 已换到 v{}，准备重启", rel.tag));
+    report(5, &format!("已换到 v{}，正在重启…", rel.tag));
 
     // 交给系统 shell 启动：新进程挂到 explorer 名下，
     // 不会跟着本进程的宿主一起被回收（有些启动器会连带子进程一起清掉）
@@ -1609,6 +1625,70 @@ fn do_update() -> Result<Value, String> {
         return Err("新版放好了，但没启动起来，请手动双击运行".into());
     }
     Ok(json!({ "ok": true, "restarting": true, "latest": rel.tag, "current": cur }))
+}
+
+fn fmt_kb(n: u64) -> String {
+    if n >= 1024 * 1024 {
+        format!("{:.1} MB", n as f64 / 1048576.0)
+    } else {
+        format!("{} KB", n / 1024)
+    }
+}
+
+// ---------- 异步更新：接口立刻返回，进度存全局，前端轮询 ----------
+static UPD_STATE: OnceLock<std::sync::Mutex<(u8, String)>> = OnceLock::new();
+
+fn upd_state() -> &'static std::sync::Mutex<(u8, String)> {
+    UPD_STATE.get_or_init(|| std::sync::Mutex::new((0, String::new())))
+}
+
+/// 0 = 空闲；1..=6 进行中/完成；9 = 失败
+fn upd_running() -> bool {
+    matches!(upd_state().lock().unwrap().0, 1..=5)
+}
+
+fn upd_status() -> (u8, String) {
+    let s = upd_state().lock().unwrap();
+    (s.0, s.1.clone())
+}
+
+fn upd_start() -> Result<(), String> {
+    {
+        let mut s = upd_state().lock().unwrap();
+        if matches!(s.0, 1..=5) {
+            return Err("已有更新在进行中".into());
+        }
+        *s = (1, "准备开始…".into());
+    }
+    thread::Builder::new()
+        .name("updater".into())
+        .spawn(|| {
+            let report = |stage: u8, msg: &str| {
+                let mut s = upd_state().lock().unwrap();
+                *s = (stage, msg.to_string());
+                util::log(&format!("[更新][{}] {}", stage, msg));
+            };
+            match do_update(&report) {
+                Ok(v) => {
+                    let restart = v.get("restarting").and_then(|x| x.as_bool()).unwrap_or(false);
+                    if restart {
+                        // 给前端一点时间看到“正在重启”再退
+                        thread::sleep(Duration::from_millis(1500));
+                        webview::remove_tray();
+                        util::log("[更新] 旧进程退出");
+                        std::process::exit(0);
+                    }
+                    // 已是最新：状态留在 6，前端自己收尾
+                }
+                Err(e) => {
+                    util::log(&format!("[更新] 失败：{}", e));
+                    let mut s = upd_state().lock().unwrap();
+                    *s = (9, e);
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|e| format!("更新线程启动失败：{}", e))
 }
 
 static PANEL: &str = include_str!("panel.html");

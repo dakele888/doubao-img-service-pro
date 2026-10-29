@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::OnceLock;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Controller, ICoreWebView2Environment};
-use webview2_com::{CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler};
+use webview2_com::{
+    CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
+    NavigationCompletedEventHandler,
+};
 use windows::core::{Interface, HRESULT, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::HBRUSH;
@@ -31,6 +34,23 @@ thread_local! {
 
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 static WEBVIEW_READY: AtomicIsize = AtomicIsize::new(0);
+static SHOWN: AtomicIsize = AtomicIsize::new(0);
+
+/// 首次亮窗定时器：页面 10 秒还没加载完也强制显示，别让用户等白屏
+const TIMER_FIRSTSHOW: usize = 2;
+
+/// 页面就绪后第一次显示窗口（只生效一次）
+fn first_show(hwnd: HWND) {
+    if SHOWN.swap(1, Ordering::Relaxed) == 1 {
+        return;
+    }
+    unsafe {
+        let _ = KillTimer(Some(hwnd), TIMER_FIRSTSHOW);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = SetForegroundWindow(hwnd);
+    }
+    crate::util::log("面板窗口已显示");
+}
 
 // ---------- 托盘 ----------
 const WM_TRAY: u32 = WM_APP + 1;
@@ -299,8 +319,9 @@ pub fn run() {
         }
         MAIN_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
 
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
+        // 窗口先不显示，等页面加载完再亮（NavigationCompleted），
+        // 定时器兑底：10 秒还没就绪也强制显示，别让用户看着白屏干等
+        let _ = SetTimer(Some(hwnd), TIMER_FIRSTSHOW, 10000, None);
         add_tray(hwnd);
 
         let mut msg = MSG::default();
@@ -340,6 +361,12 @@ fn init_webview(hwnd: HWND) {
                 let _ = ctrl.SetIsVisible(true);
 
                 if let Ok(wv) = ctrl.CoreWebView2() {
+                    // 页面加载完成才亮窗，避免启动白屏
+                    let nav = NavigationCompletedEventHandler::create(Box::new(move |_, _| {
+                        first_show(hwnd);
+                        Ok(())
+                    }));
+                    let _ = wv.add_NavigationCompleted(&nav, std::ptr::null_mut());
                     let html = crate::panel_html();
                     // 直接注入页面内容：界面本身不经过任何地址
                     let h = wide(&html);
@@ -410,6 +437,13 @@ unsafe extern "system" fn wndproc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             let mmi = &mut *(lp.0 as *mut MINMAXINFO);
             mmi.ptMinTrackSize.x = 700;
             mmi.ptMinTrackSize.y = 560;
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            if wp.0 as usize == TIMER_FIRSTSHOW {
+                // 页面迟迟没加载完：强制显示，有页面总比白屏干等强
+                first_show(h);
+            }
             LRESULT(0)
         }
         WM_CLOSE => {
