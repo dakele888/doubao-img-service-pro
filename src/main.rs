@@ -711,7 +711,10 @@ fn route(stream: &mut TcpStream, req: Req) {
             &json!({
                 "ok": true,
                 "unlocked": VIDEO_UNLOCKED.load(Ordering::Relaxed) == 1,
-                "endpoint": format!("http://{}:{}/v1/videos/generations", HOST, port()),
+                // 和生图接口保持一致的 Base URL（客户端自己拼 /videos）
+                "endpoint": format!("http://{}:{}/v1", HOST, port()),
+                // 仅供说明用，不要填到 Base URL 里
+                "videosEndpoint": format!("http://{}:{}/v1/videos", HOST, port()),
             }),
         );
     }

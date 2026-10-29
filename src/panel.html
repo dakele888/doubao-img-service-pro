@@ -195,6 +195,7 @@ button.danger:hover{background:#fdf1f0}
       <input type="text" id="vidUrl" readonly>
       <button onclick="copyVid()">复制</button>
     </div>
+    <div class="hint" style="margin-bottom:8px">和生图填同一个地址（<code>http://127.0.0.1:8788/v1</code>）。<b>不要带 /videos</b>——客户端会自己拼，带了会变成 <code>/v1/videos/generations/videos/...</code> 这种错地址。</div>
     <div class="row" style="margin-bottom:4px">
       <label>视频对话名</label>
       <input type="text" id="vidConv" placeholder="视频专用">
