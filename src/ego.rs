@@ -816,19 +816,36 @@ async function pickModel() {
 // 点「确认」才真正开始生成。有时不弹这张卡（直接生成），所以做成"有就点、没有就跳过"。
 // 返回 clicked / found-no-button / none
 async function tryConfirmVideoParams() {
-  return await page.evaluate(() => {
-    const t = (document.body.innerText || "").slice(-3000);
-    if (!/视频生成参数确认|确认后我再开始生成|请先确认以下参数/.test(t)) return "none";
-    for (const n of [...document.querySelectorAll("button,[role=button],div,span")]) {
-      if (n.children.length !== 0) continue;
+  // 豆包发的是一张纯文本的「参数确认」卡，结尾写「确认后我再开始生成视频」——
+  // 它不是按钮，要你再回一条消息才会真的开始生成。少数版本可能带按钮，所以先试按钮。
+  const found = await page.evaluate(() =>
+    /视频生成参数确认|确认后我再开始生成|请先确认以下参数/.test((document.body.innerText || "").slice(-3000))
+  );
+  if (!found) return "none";
+
+  const byBtn = await page.evaluate(() => {
+    for (const n of [...document.querySelectorAll("button,[role=button]")]) {
       const s = (n.innerText || "").trim();
-      if (s !== "确认" && s !== "确认生成" && s !== "开始生成" && s !== "继续" && s !== "好的") continue;
+      if (s !== "确认" && s !== "确认生成" && s !== "开始生成" && s !== "继续") continue;
       if (n.getBoundingClientRect().width <= 0) continue;
-      (n.closest("button") || n).click();
-      return "clicked:" + s;
+      n.click();
+      return "clicked-btn:" + s;
     }
-    return "found-no-button";
+    return "";
   });
+  if (byBtn) return byBtn;
+
+  // 没有按钮：直接回一条「确认」
+  try {
+    await page.click("css:.tiptap");
+    await page.waitForTimeout(300);
+    await page.keyboard.insertText("确认");
+    await page.waitForTimeout(500);
+    await page.press("css:.tiptap", "Enter");
+    return "clicked:text";
+  } catch (e) {
+    return "failed:" + String((e && e.message) || e);
+  }
 }
 
 // 设置画面参数：输入框上方有「自动 · Ns」控件，点开是「比例 + 时长」面板。
@@ -892,6 +909,7 @@ async function main() {
   if (!rf.ok) { emit({ ok: false, error: rf.error }); return; }
 
   let confirmState = "none";
+  let confirmTries = 0;
   try {
     await page.click("css:.tiptap");
     await page.waitForTimeout(300);
@@ -914,9 +932,9 @@ async function main() {
   while (Date.now() < deadline) {
     await page.waitForTimeout(3000);
     // 参数确认卡可能晚几秒才出现，没点中就再试
-    if (confirmState.indexOf("clicked") !== 0) {
+    if (confirmTries < 2) {
       const c = await tryConfirmVideoParams();
-      if (c !== "none") confirmState = c;
+      if (c !== "none") { confirmState = c; confirmTries++; }
     }
     const list = await videoUrls();
     const fresh = list.filter((s) => !before[s]);
