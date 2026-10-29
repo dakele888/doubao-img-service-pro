@@ -553,9 +553,6 @@ fn route(stream: &mut TcpStream, req: Req) {
         if let Some(x) = v.get("videoConversationUrl").and_then(|x| x.as_str()) {
             cfg.video_conversation_url = x.trim().chars().take(300).collect();
         }
-        if let Some(x) = v.get("videoDewatermark").and_then(|x| x.as_bool()) {
-            cfg.video_dewatermark = x;
-        }
         cfg.save(&config_file());
         let od = out_dir(&cfg);
         let _ = std::fs::create_dir_all(&od);
@@ -777,7 +774,6 @@ fn route(stream: &mut TcpStream, req: Req) {
                 "videosEndpoint": format!("http://{}:{}/v1/videos", HOST, port()),
                 "conversationName": cfg.video_conversation_name,
                 "conversationUrl": cfg.video_conversation_url,
-                "dewatermark": cfg.video_dewatermark,
             }),
         );
     }
@@ -1442,99 +1438,6 @@ fn generate_video(stream: &mut TcpStream, req: &Req) {
     }
 }
 
-// ---------------- 视频去水印 ----------------
-
-/// 找 ffmpeg：服务目录 → 魔哈自带 → 常见路径 → PATH
-fn find_ffmpeg() -> Option<std::path::PathBuf> {
-    let mut cands: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(b) = std::env::current_exe().ok().and_then(|p| p.parent().map(|x| x.to_path_buf())) {
-        cands.push(b.join("ffmpeg.exe"));
-        cands.push(b.join("ffmpeg").join("ffmpeg.exe"));
-    }
-    cands.push(std::path::PathBuf::from("D:/ruanjian/moha/ffmpeg/windows/ffmpeg.exe"));
-    cands.push(std::path::PathBuf::from("C:/ffmpeg/bin/ffmpeg.exe"));
-    for c in &cands {
-        if c.is_file() {
-            return Some(c.clone());
-        }
-    }
-    if let Ok(path) = std::env::var("PATH") {
-        for dir in path.split(';') {
-            let p = std::path::Path::new(dir).join("ffmpeg.exe");
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
-    None
-}
-
-/// 从 `ffmpeg -i` 的 stderr 里抠出 1280x720 这种分辨率
-fn parse_video_size(text: &str) -> Option<(u32, u32)> {
-    let b = text.as_bytes();
-    let mut i = 0;
-    while i < b.len() {
-        if !b[i].is_ascii_digit() {
-            i += 1;
-            continue;
-        }
-        let st = i;
-        while i < b.len() && b[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i < b.len() && b[i] == b'x' && i > st {
-            if let Ok(w) = text[st..i].parse::<u32>() {
-                let s2 = i + 1;
-                let mut j = s2;
-                while j < b.len() && b[j].is_ascii_digit() {
-                    j += 1;
-                }
-                if j > s2 {
-                    if let Ok(h) = text[s2..j].parse::<u32>() {
-                        if (100..8000).contains(&w) && (100..8000).contains(&h) {
-                            return Some((w, h));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// 用 delogo 把右下角的「豆包 AI 生成」水印糊掉。
-/// 1280x720 实测坐标 x=1015 y=668 w=245 h=50，其它分辨率按比例换算。
-/// 处理失败返回 Err，调用方保留原文件。
-fn remove_video_watermark(file: &std::path::Path) -> Result<(), String> {
-    let ff = find_ffmpeg().ok_or_else(|| "机器上没有 ffmpeg".to_string())?;
-    let probe = std::process::Command::new(&ff)
-        .arg("-i")
-        .arg(file)
-        .output()
-        .map_err(|e| e.to_string())?;
-    let (wd, ht) = parse_video_size(&String::from_utf8_lossy(&probe.stderr)).ok_or_else(|| "读不到分辨率".to_string())?;
-    let dx = (wd as f32 * 0.793) as u32;
-    let dy = (ht as f32 * 0.928) as u32;
-    let dw = (wd as f32 * 0.191) as u32;
-    let dh = (ht as f32 * 0.069) as u32;
-    let tmp = file.with_extension("wm.mp4");
-    let vf = format!("delogo=x={}:y={}:w={}:h={}", dx, dy, dw.max(2), dh.max(2));
-    let out = std::process::Command::new(&ff)
-        .args(["-y", "-i"])
-        .arg(file)
-        .args(["-vf", &vf, "-c:v", "libx264", "-crf", "18", "-c:a", "copy"])
-        .arg(&tmp)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !tmp.is_file() || !out.status.success() {
-        let _ = std::fs::remove_file(&tmp);
-        let msg: String = String::from_utf8_lossy(&out.stderr).chars().take(180).collect();
-        return Err(msg);
-    }
-    std::fs::rename(&tmp, file).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 fn produce_video(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failure> {
     let cfg = Config::load(&config_file());
     let bin = util::find_ego(&cfg);
@@ -1727,19 +1630,21 @@ fn produce_image(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failu
     let _ = std::fs::create_dir_all(&od);
     let name = util::md5_name(&url);
     let file = od.join(&name);
+    // 豆包视频地址带 lr=video_gen_watermark_dyn（预览带水印），
+    // 换成 lr=video_gen_no_watermark 能拿到无水印源；拿不到就退回原地址。
+    let nowm = url
+        .replace("lr=video_gen_watermark_dyn", "lr=video_gen_no_watermark")
+        .replace("lr=video_gen_watermark", "lr=video_gen_no_watermark");
+    if nowm != url {
+        if let Ok(bytes) = util::download(&nowm, &file) {
+            util::log(&format!("[视频] 已取无水印版（{}KB）", bytes / 1024));
+            util::auto_clean(&od, &cfg);
+            return Ok(Produced { direct: false, src_url: url, name, bytes, file });
+        }
+        util::log("[视频] 无水印地址不可用，改用原始地址（带水印）");
+    }
     match util::download(&url, &file) {
-        Ok(mut bytes) => {
-            // 豆包视频右下角有「豆包 AI 生成」水印，下载后用 delogo 糊掉。
-            // 改 URL 的 lr 参数没用（实测服务端忽略），只能后期处理。
-            if cfg.video_dewatermark {
-                match remove_video_watermark(&file) {
-                    Ok(()) => {
-                        bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(bytes);
-                        util::log("[视频] 已去掉右下角水印");
-                    }
-                    Err(e) => util::log(&format!("[视频] 去水印跳过：{}", e)),
-                }
-            }
+        Ok(bytes) => {
             util::auto_clean(&od, &cfg);
             Ok(Produced { direct: false, src_url: url, name, bytes, file })
         }
