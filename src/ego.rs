@@ -45,6 +45,37 @@ pub fn build_script(
         .replace("@@DEADLINE@@", &deadline.to_string())
 }
 
+/// 视频中转脚本：和生图同一套思路（占住对话页 → 切视频模式 → 发提示词 → 嗅探视频地址）
+pub fn build_video_script(
+    prompt: &str,
+    page_label: &str,
+    conv_name: &str,
+    timeout_ms: u64,
+    refs: &[RefImage],
+) -> String {
+    let prompt_json = serde_json::to_string(prompt).unwrap_or_else(|_| "\"\"".into());
+    let page_json = serde_json::to_string(page_label).unwrap_or_else(|_| "\"p2\"".into());
+    let name_json = serde_json::to_string(conv_name).unwrap_or_else(|_| "\"视频专用\"".into());
+    let deadline = timeout_ms.saturating_sub(60_000);
+
+    let refs_json = serde_json::to_string(
+        &refs
+            .iter()
+            .map(|(name, mime, data)| serde_json::json!({ "name": name, "mime": mime, "b64": data }))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".into());
+
+    VIDEO_TPL
+        .replace("@@SPACE@@", SPACE)
+        .replace("@@MARK@@", MARK)
+        .replace("@@PROMPT@@", &prompt_json)
+        .replace("@@PAGE@@", &page_json)
+        .replace("@@NAME@@", &name_json)
+        .replace("@@IMAGES@@", &refs_json)
+        .replace("@@DEADLINE@@", &deadline.to_string())
+}
+
 const TPL: &str = r##"
 const task = await taskSpace("@@SPACE@@");
 // 接口返回的图片档位："ori"=网页「下载原图」同档（带水印）、"raw"=无水印原图、"thumb"=列表缩略图
@@ -476,6 +507,296 @@ async function main() {
   } catch (e) {
     emit({ ok: false, error: "脚本异常：" + String((e && e.message) || e) });
   }
+}
+
+if (__needLogin) {
+  emit({ ok: false, code: "NOT_LOGGED_IN", error: "豆包还没登录：请在 ego 浏览器里打开 doubao.com 扫码登录，登录后重试", convUrl: __wall.url });
+} else {
+  await main();
+}
+"##;
+
+// 视频中转脚本：和生图同一套路（占住对话页 → 切视频模式 → 发提示词 → 嗅探视频地址）。
+// 豆包的视频地址藏在页面 video 元素和接口响应里，抓法比图片宽一些。
+const VIDEO_TPL: &str = r##"
+const task = await taskSpace("@@SPACE@@");
+const PROMPT = @@PROMPT@@;
+const PAGE_LABEL = @@PAGE@@;
+const CONV_NAME = @@NAME@@;
+const REFS = @@IMAGES@@;
+
+const pages = await task.pages();
+let page = pages.find((p) => p.label === PAGE_LABEL) || pages[0];
+function emit(obj) { console.log("@@MARK@@" + JSON.stringify(obj)); }
+
+async function ensureChat() {
+  const u = await page.url();
+  if (u.indexOf("doubao.com") < 0) {
+    await page.goto("https://www.doubao.com/chat/", { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(2800);
+  }
+}
+
+function listConvs() {
+  return page.evaluate(() => {
+    const seen = {};
+    const out = [];
+    document.querySelectorAll("a[href*='/chat/']").forEach((a) => {
+      const tail = (a.getAttribute("href") || "").split("/chat/")[1] || "";
+      const id = tail.split("?")[0].split("/")[0];
+      if (!id || !/^[0-9]+$/.test(id) || seen[id]) return;
+      seen[id] = 1;
+      out.push({ id: id, name: String(a.innerText || "").replace(/[\s]+/g, " ").trim() });
+    });
+    return out;
+  });
+}
+
+// 嗅探视频地址：页面 video 元素 + fetch/XHR 响应里带 .mp4 或视频 CDN 的字符串
+async function installHook() {
+  try {
+    await page.evaluate(() => {
+      if (window.__mohaVidHook) return;
+      window.__mohaVidHook = 1;
+      const V = (window.__mohaVideos = window.__mohaVideos || {});
+      const RE = /\.mp4(\?|$)|vlabvod|video[-_]?sign|rc_gen_video|videogen|vod\./i;
+      function put(u) {
+        try {
+          const s = String(u || "");
+          if (s.length < 20 || s.length > 4000) return;
+          if (!/^https?:/.test(s)) return;
+          if (!RE.test(s)) return;
+          const base = s.split("?")[0];
+          const key = base.split("/").pop() || base.slice(-40);
+          V[key] = s;
+        } catch (e) {}
+      }
+      function scan(o, d) {
+        try {
+          if (!o || typeof o !== "object" || d > 8) return;
+          if (Array.isArray(o)) { o.forEach((x) => scan(x, d + 1)); return; }
+          for (const k in o) {
+            const v = o[k];
+            if (typeof v === "string") put(v);
+            else if (v && typeof v === "object") scan(v, d + 1);
+          }
+        } catch (e) {}
+      }
+      if (window.fetch) {
+        const of_ = window.fetch;
+        window.fetch = function () {
+          const p = of_.apply(this, arguments);
+          try {
+            p.then((res) => {
+              try {
+                const ct = (res.headers && res.headers.get("content-type")) || "";
+                if (ct.indexOf("json") >= 0) res.clone().json().then((j) => scan(j, 0)).catch(() => {});
+              } catch (e) {}
+            }).catch(() => {});
+          } catch (e) {}
+          return p;
+        };
+      }
+      const oo = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (m, u) { this.__mohaUrl = u; return oo.apply(this, arguments); };
+      const os = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.send = function () {
+        try {
+          this.addEventListener("load", () => {
+            try {
+              const t = this.responseText || "";
+              if (t.length < 8e6 && (t.indexOf(".mp4") >= 0 || t.indexOf("video") >= 0)) scan(JSON.parse(t), 0);
+            } catch (e) {}
+          });
+        } catch (e) {}
+        return os.apply(this, arguments);
+      };
+    });
+  } catch (e) {}
+}
+
+function videoUrls() {
+  return page.evaluate(() => {
+    const out = [];
+    try {
+      [...document.querySelectorAll("video")].forEach((v) => {
+        const s = v.currentSrc || v.src || "";
+        if (/^https?:/.test(s)) out.push(s);
+        [...v.querySelectorAll("source")].forEach((x) => {
+          const q = x.src || "";
+          if (/^https?:/.test(q)) out.push(q);
+        });
+      });
+    } catch (e) {}
+    const T = window.__mohaVideos || {};
+    for (const k in T) out.push(T[k]);
+    return [...new Set(out)];
+  });
+}
+
+// 视频模式同样支持参考图（首帧），粘贴方式和生图一样
+function attachCount() {
+  return page.evaluate(() =>
+    [...document.querySelectorAll("img")]
+      .filter((i) => /^blob:/.test(i.src || ""))
+      .filter((i) => {
+        const r = i.getBoundingClientRect();
+        return r.width > 30 && r.width < 130;
+      }).length
+  );
+}
+
+async function attachRefs() {
+  if (!REFS.length) return { ok: true, n: 0 };
+  const before = await attachCount();
+  for (let i = 0; i < REFS.length; i++) {
+    try { await page.click("css:.tiptap"); } catch (e) {}
+    await page.waitForTimeout(300);
+    const r = await page.evaluate((one) => {
+      try {
+        const bin = atob(one.b64);
+        const arr = new Uint8Array(bin.length);
+        for (let k = 0; k < bin.length; k++) arr[k] = bin.charCodeAt(k);
+        const file = new File([arr], one.name || "ref.png", { type: one.mime || "image/png" });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        const ed = document.querySelector(".tiptap");
+        if (!ed) return { ok: false, why: "no-editor" };
+        ed.focus();
+        ed.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, why: String((e && e.message) || e) };
+      }
+    }, REFS[i]);
+    if (!r || !r.ok) return { ok: false, error: "参考图粘贴失败：" + JSON.stringify(r) };
+    await page.waitForTimeout(1800);
+  }
+  let after = before;
+  for (let k = 0; k < 30; k++) {
+    after = await attachCount();
+    if (after >= before + REFS.length) return { ok: true, n: REFS.length };
+    await page.waitForTimeout(600);
+  }
+  return { ok: false, error: "参考图没出现在输入框（" + before + "→" + after + "）" };
+}
+
+// 切视频模式：豆包入口文案可能是「视频生成 / 生成视频 / AI视频」，逐个精确点一遍
+async function enterVideoMode() {
+  const tried = [];
+  for (let round = 0; round < 3; round++) {
+    const clicked = await page.evaluate(() => {
+      const want = ["视频生成", "生成视频", "AI视频", "AI 视频"];
+      const nodes = [...document.querySelectorAll("button,[role=button],div,span")];
+      for (const w of want) {
+        for (const n of nodes) {
+          if (n.children.length !== 0) continue;
+          const t = (n.innerText || "").trim();
+          if (t !== w) continue;
+          const r = n.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) continue;
+          (n.closest("button") || n).click();
+          return w;
+        }
+      }
+      return null;
+    });
+    if (clicked) {
+      tried.push(clicked);
+      await page.waitForTimeout(3200);
+      return { ok: true, clicked: tried };
+    }
+    await page.waitForTimeout(1500);
+  }
+  return { ok: false, clicked: tried };
+}
+
+try { await ensureChat(); } catch (e) {}
+
+// 未登录直接报错，别等十分钟
+const __wall = await page.evaluate(() => ({
+  url: location.href,
+  hasInput: !!document.querySelector(".tiptap"),
+  text: (document.body.innerText || "").slice(0, 3000),
+}));
+const __needLogin = ((/扫码登录|手机号登录|立即登录|登录后即可|验证码登录/.test(__wall.text) && !__wall.hasInput)
+  || /login|passport|sso/i.test(__wall.url));
+
+async function main() {
+  // 找到「视频专用」会话就进去，找不到就用当前页
+  let convHit = null;
+  let convUrl = "";
+  try {
+    const convs = await listConvs();
+    convHit = convs.find((c) => c.name === CONV_NAME) || null;
+    if (convHit) {
+      const cur = await page.url();
+      if (cur.indexOf(convHit.id) < 0) {
+        await page.goto("https://www.doubao.com/chat/" + convHit.id, { waitUntil: "domcontentloaded" });
+        await page.waitForTimeout(2600);
+      }
+    }
+  } catch (e) {}
+  try { convUrl = await page.url(); } catch (e) {}
+
+  await installHook();
+
+  const mode = await enterVideoMode();
+
+  // 记录发之前已有的视频地址，之后只认新增的
+  const before = {};
+  (await videoUrls()).forEach((s) => (before[s] = 1));
+
+  const rf = await attachRefs();
+  if (!rf.ok) { emit({ ok: false, error: rf.error }); return; }
+
+  try {
+    await page.click("css:.tiptap");
+    await page.waitForTimeout(300);
+    await page.keyboard.insertText(PROMPT);
+    await page.waitForTimeout(600);
+    await page.press("css:.tiptap", "Enter");
+  } catch (e) {
+    emit({ ok: false, error: "输入提示词失败：" + String((e && e.message) || e) });
+    return;
+  }
+
+  const deadline = Date.now() + @@DEADLINE@@;
+  let hit = null;
+  let freshUrls = [];
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(3000);
+    const list = await videoUrls();
+    const fresh = list.filter((s) => !before[s]);
+    if (fresh.length) {
+      hit = fresh[fresh.length - 1];
+      freshUrls = fresh;
+      break;
+    }
+  }
+
+  const tail = await page.evaluate(() => (document.body.innerText || "").slice(-400));
+  if (!hit) {
+    emit({
+      ok: false,
+      error: "等待超时，没抓到视频地址",
+      mode: mode,
+      convUrl: convUrl,
+      pageTail: tail,
+    });
+    return;
+  }
+  emit({
+    ok: true,
+    url: hit,
+    urls: freshUrls,
+    pageLabel: page.label,
+    convUrl: convUrl,
+    convHit: !!convHit,
+    mode: mode,
+    refs: REFS.length,
+    pageTail: tail,
+  });
 }
 
 if (__needLogin) {

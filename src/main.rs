@@ -46,6 +46,14 @@ pub fn port() -> u16 {
 }
 const HOST: &str = "127.0.0.1";
 const GEN_TIMEOUT_MS: u64 = 240_000;
+/// 视频生成比图片慢很多，给足时间（10 分钟）
+const VIDEO_TIMEOUT_MS: u64 = 600_000;
+/// 面板里进入「视频中转」的密码
+const VIDEO_PASSWORD: &str = "12345678";
+/// 视频解锁状态（进程内，重启后需重输）
+static VIDEO_UNLOCKED: AtomicU64 = AtomicU64::new(0);
+/// 视频串行锁：同一时间只跑一个，避免抢豆包页面
+static VIDEO_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
 const MAX_QUEUE: usize = 30;
 const QUEUE_WAIT_MS: u64 = 1_800_000;
 
@@ -510,6 +518,10 @@ fn route(stream: &mut TcpStream, req: Req) {
             // 兼容旧面板/脚本
             cfg.image_tier = if x { "raw".into() } else { "ori".into() };
         }
+        if let Some(x) = v.get("videoConversationName").and_then(|x| x.as_str()) {
+            let t = x.trim();
+            cfg.video_conversation_name = if t.is_empty() { "视频专用".into() } else { t.chars().take(40).collect() };
+        }
         cfg.save(&config_file());
         let od = out_dir(&cfg);
         let _ = std::fs::create_dir_all(&od);
@@ -648,6 +660,10 @@ fn route(stream: &mut TcpStream, req: Req) {
                     "image/png"
                 } else if low.ends_with(".webp") {
                     "image/webp"
+                } else if low.ends_with(".mp4") {
+                    "video/mp4"
+                } else if low.ends_with(".webm") {
+                    "video/webm"
                 } else {
                     "image/jpeg"
                 };
@@ -659,6 +675,35 @@ fn route(stream: &mut TcpStream, req: Req) {
 
     if m == "POST" && (p == "/v1/images/generations" || p == "/v1/images/edits") {
         return generate(stream, &req);
+    }
+
+    // 视频中转：面板输密码解锁后才会显示入口
+    if m == "POST" && p == "/api/video/unlock" {
+        let v: Value = serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}));
+        let pw = v.get("password").and_then(|x| x.as_str()).unwrap_or("");
+        if pw == VIDEO_PASSWORD {
+            VIDEO_UNLOCKED.store(1, Ordering::Relaxed);
+            util::log("[视频] 面板已解锁视频中转");
+            return json_resp(stream, 200, &json!({ "ok": true }));
+        }
+        util::log("[视频] 面板解锁密码不对");
+        return json_resp(stream, 200, &json!({ "ok": false, "error": "密码不对" }));
+    }
+
+    if m == "GET" && p == "/api/video/status" {
+        return json_resp(
+            stream,
+            200,
+            &json!({
+                "ok": true,
+                "unlocked": VIDEO_UNLOCKED.load(Ordering::Relaxed) == 1,
+                "endpoint": format!("http://{}:{}/v1/videos/generations", HOST, port()),
+            }),
+        );
+    }
+
+    if m == "POST" && p == "/v1/videos/generations" {
+        return generate_video(stream, &req);
     }
 
     json_resp(stream, 404, &json!({ "error": "not found" }))
@@ -808,6 +853,151 @@ fn generate(stream: &mut TcpStream, req: &Req) {
                 &json!({ "error": { "message": f.message, "code": f.code } }),
             )
         }
+    }
+}
+
+/// 视频中转：接 {"prompt": "..."}（可带参考图），返回 {"data":[{"url":"..."}]}
+fn generate_video(stream: &mut TcpStream, req: &Req) {
+    let low = req.ctype.to_lowercase();
+    let is_json_body = req.body.first().map(|b| *b == b'{' || *b == b'[').unwrap_or(false);
+
+    let parsed = if low.contains("multipart/form-data") {
+        parse_multipart_req(&req.body, &req.ctype)
+    } else if low.contains("x-www-form-urlencoded") {
+        parse_form_req(&req.body)
+    } else if low.contains("json") || is_json_body || req.body.is_empty() {
+        parse_json_req(&req.body)
+    } else {
+        parse_json_req(&req.body).or_else(|_| parse_multipart_req(&req.body, &req.ctype))
+    };
+
+    let (prompt, _want_b64, refs) = match parsed {
+        Ok(x) => x,
+        Err(e) => {
+            return json_resp(
+                stream,
+                400,
+                &json!({ "error": { "message": e, "type": "invalid_request_error" } }),
+            )
+        }
+    };
+    let prompt = prompt.trim().to_string();
+    if prompt.is_empty() {
+        return json_resp(
+            stream,
+            400,
+            &json!({ "error": { "message": "prompt 不能为空", "type": "invalid_request_error" } }),
+        );
+    }
+
+    util::log(&format!(
+        "[视频] 收到{}：{}",
+        if refs.is_empty() { String::new() } else { format!("（参考图 {} 张）", refs.len()) },
+        prompt.chars().take(40).collect::<String>()
+    ));
+
+    // 视频生成很慢，同一时间只跑一个，避免多个请求把豆包页面抢乱
+    let _guard = VIDEO_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let started = util::now_ms();
+    match produce_video(&prompt, &refs) {
+        Ok(res) => {
+            let cost = ((util::now_ms().saturating_sub(started)) as f64) / 1000.0;
+            util::log(&format!("[视频] 完成（{:.1}s）{} {}KB", cost, res.name, res.bytes / 1024));
+            let public_url = format!("http://{}:{}/files/{}", HOST, port(), res.name);
+            json_resp(
+                stream,
+                200,
+                &json!({
+                    "created": util::now_ms() / 1000,
+                    "data": [{ "url": public_url }],
+                    "elapsed": cost,
+                }),
+            )
+        }
+        Err(f) => {
+            let cost = ((util::now_ms().saturating_sub(started)) as f64) / 1000.0;
+            util::log(&format!("[视频] 失败（{:.1}s）：{}", cost, f.message));
+            let code = match f.code.as_str() {
+                "NOT_LOGGED_IN" => 401,
+                _ => 502,
+            };
+            json_resp(stream, code, &json!({ "error": { "message": f.message, "code": f.code } }))
+        }
+    }
+}
+
+fn produce_video(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failure> {
+    let cfg = Config::load(&config_file());
+    let bin = util::find_ego(&cfg);
+
+    let script = ego::build_video_script(
+        prompt,
+        &cfg.page_label,
+        &cfg.video_conversation_name,
+        VIDEO_TIMEOUT_MS,
+        refs,
+    );
+
+    let v = match ego::run(&bin, &script, Duration::from_millis(VIDEO_TIMEOUT_MS)) {
+        Ok(v) => v,
+        Err(e) => return Err(Failure { message: e, code: "VIDEO_FAILED".into() }),
+    };
+    if v.get("ok").and_then(|x| x.as_bool()) != Some(true) {
+        let msg = v.get("error").and_then(|x| x.as_str()).unwrap_or("未知错误").to_string();
+        let code = v.get("code").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        // 把页面上看到的内容记下来，方便下次调整选择器
+        if let Some(t) = v.get("pageTail").and_then(|x| x.as_str()) {
+            let tail: String = t.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect();
+            util::log(&format!("[视频] 页面尾部：{}", tail.replace('\n', " ")));
+        }
+        if let Some(m) = v.get("mode") {
+            util::log(&format!("[视频] 模式切换结果：{}", m));
+        }
+        if code.is_empty() {
+            return Err(Failure { message: msg, code: "VIDEO_FAILED".into() });
+        }
+        return Err(Failure { message: msg, code });
+    }
+
+    let url = v.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if url.is_empty() {
+        return Err(Failure { message: "没有拿到视频地址".into(), code: "VIDEO_FAILED".into() });
+    }
+    if let Some(m) = v.get("mode") {
+        util::log(&format!("[视频] 模式切换结果：{}", m));
+    }
+    if let Some(urls) = v.get("urls").and_then(|x| x.as_array()) {
+        for u in urls {
+            if let Some(s) = u.as_str() {
+                let short: String = s.chars().take(220).collect();
+                util::log(&format!("[视频] 抓到地址：{}", short));
+            }
+        }
+    }
+
+    // 回写视频会话地址，方便排查
+    let mut cur = Config::load(&config_file());
+    if let Some(cu) = v.get("convUrl").and_then(|x| x.as_str()) {
+        if cu.contains("/chat/") && cur.conversation_url != cu {
+            cur.conversation_url = cu.to_string();
+            cur.save(&config_file());
+        }
+    }
+
+    let od = out_dir(&cfg);
+    let _ = std::fs::create_dir_all(&od);
+    let name = util::md5_name_ext(&url, "mp4");
+    let file = od.join(&name);
+    match util::download(&url, &file) {
+        Ok(bytes) => {
+            util::auto_clean(&od, &cfg);
+            Ok(Produced { direct: false, src_url: url, name, bytes, file })
+        }
+        Err(e) => Err(Failure { message: format!("下载失败：{}", e), code: "DOWNLOAD_FAILED".into() }),
     }
 }
 

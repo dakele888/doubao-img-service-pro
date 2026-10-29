@@ -32,6 +32,7 @@ button.danger:hover{background:#fdf1f0}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px;margin-top:4px}
 .ph{border:1px solid #e2e8e4;border-radius:8px;overflow:hidden;background:#fbfcfb;position:relative}
 .ph img{width:100%;height:82px;object-fit:cover;display:block;background:#eef2ef}
+.ph video{width:100%;height:82px;object-fit:cover;display:block;background:#eef2ef}
 .ph .m{padding:5px 7px;font-size:11px;color:#7b8a82;display:flex;justify-content:space-between;gap:4px}
 .ph .x{position:absolute;top:5px;right:5px;background:rgba(0,0,0,.55);color:#fff;border:0;border-radius:5px;width:20px;height:20px;line-height:18px;padding:0;font-size:12px;cursor:pointer}
 .empty{color:#93a099;font-size:13px;padding:10px 0}
@@ -173,6 +174,36 @@ button.danger:hover{background:#fdf1f0}
     <button class="primary" onclick="saveCache()">保存缓存设置</button>
     <button onclick="cleanup()">立即清理</button>
     <button class="danger" onclick="clearAll()">清空全部</button>
+  </div>
+</div>
+
+<div class="card" id="vidCard">
+  <div class="card-h2">
+    <h2>视频中转 <span class="stat" id="vidStat">未解锁</span></h2>
+  </div>
+  <div id="vidLock">
+    <div class="row">
+      <label>进入密码</label>
+      <input type="password" id="vidPw" placeholder="输入密码后进入" onkeydown="if(event.key==='Enter')unlockVideo()">
+      <button class="primary" onclick="unlockVideo()">进入</button>
+    </div>
+    <div class="hint">视频中转是增强功能，需要密码才能开启。</div>
+  </div>
+  <div id="vidBody" style="display:none">
+    <div class="row">
+      <label>接口地址</label>
+      <input type="text" id="vidUrl" readonly>
+      <button onclick="copyVid()">复制</button>
+    </div>
+    <div class="row" style="margin-bottom:4px">
+      <label>视频对话名</label>
+      <input type="text" id="vidConv" placeholder="视频专用">
+      <button class="primary" onclick="saveVidConv()">保存</button>
+    </div>
+    <div class="hint" style="margin-bottom:8px">视频生成很慢（通常 1~5 分钟），同一时间只跑一个请求，请耐心等。</div>
+    <div class="hint">用法：POST <code>/v1/videos/generations</code>，跟生图接口一样的 body：<br>
+      <code>{"prompt":"一只猫在草地上奔跑"}</code><br>
+      返回：<code>{"data":[{"url":"http://127.0.0.1:8788/files/xxxx.mp4"}]}</code></div>
   </div>
 </div>
 
@@ -460,6 +491,8 @@ function load(){
     $('keepDays').value=d.cfg.keepDays;
     $('directMode').checked=!!d.cfg.directMode;
     $('imgTier').value=(d.cfg.imageTier==='raw'||d.cfg.imageTier==='thumb')?d.cfg.imageTier:'ori';
+    $('vidConv').value=d.cfg.videoConversationName||'视频专用';
+    videoStatus();
     applyTierHint();
     applyDirectUI();
     $('baseUrl').value=BASE+'/v1';
@@ -478,7 +511,7 @@ function load(){
     $('empty').style.display=d.images.length?'none':'block';
     d.images.forEach(function(it){
       var w=document.createElement('div');w.className='ph';
-      w.innerHTML='<img src="'+BASE+'/files/'+it.name+'" loading="lazy">'+
+      w.innerHTML=mediaHtml(it.name,false)+
         '<button class="x" title="删除">×</button>'+
         '<div class="m"><span>'+fmt(it.size)+'</span><span>'+new Date(it.mtime).toLocaleTimeString('zh-CN',{hour12:false})+'</span></div>';
       w.querySelector('.x').onclick=function(){del(it.name)};
@@ -494,7 +527,7 @@ function refreshImages(){
     $('stat').textContent='（'+d.stat.count+' 张，'+fmt(d.stat.bytes)+'）';
     d.images.forEach(function(it){
       var w=document.createElement('div');w.className='ph';
-      w.innerHTML='<img src="'+BASE+'/files/'+it.name+'?t='+Date.now()+'" loading="lazy">'+
+      w.innerHTML=mediaHtml(it.name,true)+
         '<button class="x" title="删除">×</button>'+
         '<div class="m"><span>'+fmt(it.size)+'</span><span>'+new Date(it.mtime).toLocaleTimeString('zh-CN',{hour12:false})+'</span></div>';
       w.querySelector('.x').onclick=function(){del(it.name)};
@@ -542,10 +575,57 @@ function applyTierHint(){
   };
   $('rawHint').textContent = m[$('imgTier').value] || m.ori;
 }
-function cleanup(){api('/api/cleanup',{method:'POST'}).then(function(d){toast('清理了 '+d.removed.length+' 张');load()})}
-function clearAll(){if(!confirm('清空缓存目录里的所有图片？'))return;api('/api/clear',{method:'POST'}).then(function(d){toast('已清空 '+d.removed+' 张');load()})}
+function cleanup(){api('/api/cleanup',{method:'POST'}).then(function(d){toast('清理了 '+d.removed.length+' 张');load()})}function clearAll(){if(!confirm('清空缓存目录里的所有图片？'))return;api('/api/clear',{method:'POST'}).then(function(d){toast('已清空 '+d.removed+' 张');load()})}
 function del(n){api('/api/delete',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:n})}).then(function(){load()})}
 function reveal(){api('/api/reveal',{method:'POST'}).then(function(){toast('已打开目录')})}
+
+function mediaHtml(name,noCache){
+  var q=noCache?'?t='+Date.now():'';
+  if(/\.(mp4|webm)$/i.test(name)){
+    return '<video src="'+BASE+'/files/'+name+q+'" muted loop preload="metadata"></video>';
+  }
+  return '<img src="'+BASE+'/files/'+name+q+'" loading="lazy">';
+}
+
+// ---- 视频中转：密码解锁后显示入口 ----
+function renderVideo(d){
+  var lock=$('vidLock'), body=$('vidBody'), stat=$('vidStat'), url=$('vidUrl');
+  if(!lock) return;
+  if(d && d.unlocked){
+    lock.style.display='none';
+    body.style.display='';
+    stat.textContent='已解锁';
+    if(url) url.value=d.endpoint||'';
+  }else{
+    lock.style.display='';
+    body.style.display='none';
+    stat.textContent='未解锁';
+  }
+}
+function videoStatus(){
+  api('/api/video/status').then(renderVideo).catch(function(){});
+}
+function unlockVideo(){
+  var pw=($('vidPw').value||'').trim();
+  if(!pw){ toast('请输入密码'); return; }
+  api('/api/video/unlock',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:pw})})
+    .then(function(r){
+      if(r && r.ok){ $('vidPw').value=''; toast('已进入视频中转'); videoStatus(); }
+      else toast((r&&r.error)||'密码不对');
+    }).catch(function(){ toast('请求失败'); });
+}
+function copyVid(){
+  var v=$('vidUrl').value;
+  navigator.clipboard&&navigator.clipboard.writeText(v);
+  toast('已复制 '+v);
+}
+function saveVidConv(){
+  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({videoConversationName:$('vidConv').value.trim()})})
+    .then(function(r){
+      if(r && r.ok===false){ toast(r.error||'保存失败'); return; }
+      toast('已保存');
+    }).catch(function(){ toast('保存失败'); });
+}
 load();
 tickQueue();
 checkVer(false);

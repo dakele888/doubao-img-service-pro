@@ -20,6 +20,8 @@ pub struct Config {
     /// "raw"=无水印原图（image_ori_raw）、"thumb"=列表缩略图（最快）。
     /// 旧配置里的 rawImage 布尔会迁移（true→raw，false→ori）。
     pub image_tier: String,
+    /// 视频中转专用会话名（和生图分开，避免图片/视频混在一个对话里）
+    pub video_conversation_name: String,
 }
 
 impl Default for Config {
@@ -36,6 +38,7 @@ impl Default for Config {
             ego_path: String::new(),
             require_password: true,
             image_tier: "ori".into(),
+            video_conversation_name: "视频专用".into(),
         }
     }
 }
@@ -73,6 +76,7 @@ impl Config {
                     v.get("rawImage").and_then(|x| x.as_bool()).map(|b| if b { "raw".into() } else { "ori".into() })
                 })
                 .unwrap_or_else(|| d.image_tier.clone()),
+            video_conversation_name: s("videoConversationName", &d.video_conversation_name),
         }
     }
 
@@ -89,6 +93,7 @@ impl Config {
             "egoPath": self.ego_path,
             "requirePassword": self.require_password,
             "imageTier": self.image_tier,
+            "videoConversationName": self.video_conversation_name,
             // 派生字段：给回滚到旧版时保持语义（raw=无水印）
             "rawImage": self.image_tier == "raw",
         })
