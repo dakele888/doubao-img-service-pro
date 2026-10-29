@@ -209,6 +209,11 @@ async function main() {
         try {
           if (!obj || typeof obj !== "object") return;
           if (Array.isArray(obj)) { obj.forEach(scan); return; }
+          // 无水印的原始接口：/video/fplay/ 下的 fallback_api，后面加参数就能拿未加水印的源
+          if (typeof obj.fallback_api === "string" && obj.fallback_api.indexOf("/video/fplay/") >= 0) {
+            window.__mohaFallback = window.__mohaFallback || [];
+            if (window.__mohaFallback.indexOf(obj.fallback_api) < 0) window.__mohaFallback.push(obj.fallback_api);
+          }
           for (const k in obj) {
             const v = obj[k];
             if (typeof v === "string") putUrl(v);
@@ -675,6 +680,115 @@ async function scrollToLatest() {
   } catch (e) {}
 }
 
+// 无水印解析：全程在页面里做（等价于浏览器扩展的做法）
+// fallback_api 是豆包视频的原始接口，加 logo_type=unwatermarked 返回的就是未加水印的源；
+// 里面的 main_url 是 qAAB 令牌（AES-128-CBC），key/iv 由 key_seed 双重 SHA-512 派生。
+const QAAB_SALT =
+  "4dd4c2e6b83162090e52b3c7a6733ba41cb2462b829ab58a196b39db57177524f49baf7f08e8d68d26a72e37c1a95a2f1f05a51892aef2949732b62a38aadd58";
+
+async function resolveUnwatermarked() {
+  try {
+    return await page.evaluate(async (saltHex) => {
+      const apis = (window.__mohaFallback || []).slice(0, 4);
+      if (!apis.length) return "";
+
+      const b64 = (str) => {
+        const txt = String(str || "").trim();
+        if (!txt) return null;
+        const variants = [
+          txt,
+          txt.replace(/\$/g, "_").replace(/@/g, "/").replace(/#/g, "."),
+          txt.replace(/\$/g, "+").replace(/@/g, "/").replace(/#/g, "="),
+        ];
+        for (const v of variants) {
+          if (!v) continue;
+          let n = v.replace(/-/g, "+").replace(/_/g, "/");
+          while (n.length % 4) n += "=";
+          try {
+            const bin = atob(n);
+            const out = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+            return out;
+          } catch (e) {}
+        }
+        return null;
+      };
+      const hex = (h) => {
+        const out = new Uint8Array(h.length / 2);
+        for (let i = 0; i < out.length; i++) out[i] = parseInt(h.substr(i * 2, 2), 16);
+        return out;
+      };
+      const sha512 = async (bytes) => new Uint8Array(await crypto.subtle.digest("SHA-512", bytes));
+
+      const decodeQaab = async (token, seedStr) => {
+        const data = b64(token);
+        const seed = b64(seedStr);
+        if (!data || !seed) return "";
+        const first = await sha512(seed.slice(0, 32));
+        const salt = hex(saltHex);
+        const buf = new Uint8Array(first.length + salt.length);
+        buf.set(first, 0);
+        buf.set(salt, first.length);
+        const material = await sha512(buf);
+        const key = material.slice(0, 16);
+        const iv = material.slice(16, 32);
+        const attempts = [];
+        const isQ = data.length > 4 && data[0] === 0xa8 && data[1] === 0 && data[2] === 1 && data[3] === 0;
+        if (isQ) {
+          attempts.push([data.slice(4), key, iv], [data.slice(4), iv, key]);
+          if (data.length > 36) {
+            attempts.push([data.slice(36), key, data.slice(20, 36)], [data.slice(36), key, iv]);
+          }
+        } else {
+          attempts.push([data, key, iv]);
+        }
+        for (const [payload, k, i] of attempts) {
+          if (!payload.length || payload.length % 16) continue;
+          try {
+            const ck = await crypto.subtle.importKey("raw", k, { name: "AES-CBC" }, false, ["decrypt"]);
+            const pt = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-CBC", iv: i }, ck, payload));
+            const out = new TextDecoder().decode(pt).trim();
+            if (/^https?:\/\//.test(out)) return out;
+          } catch (e) {}
+        }
+        return "";
+      };
+
+      for (const api of apis) {
+        try {
+          const u = new URL(api, location.href);
+          u.searchParams.delete("codec_type");
+          u.searchParams.delete("logo_type");
+          u.searchParams.set("codec_type", "8");
+          u.searchParams.set("logo_type", "unwatermarked");
+          const r = await fetch(u.toString(), { credentials: "include" });
+          if (!r.ok) continue;
+          const j = await r.json();
+          const vi = j.video_info || (j.data && j.data.video_info) || j;
+          const d = (vi && vi.data) || vi || {};
+          let list = d.video_list;
+          if (list && !Array.isArray(list)) list = Object.values(list);
+          if (!Array.isArray(list) || !list.length) list = [d];
+          const cand = list.filter((x) => x && (x.main_url || x.play_url));
+          if (!cand.length) continue;
+          cand.sort((a, b) => {
+            const s = (o) => (Number(o.vwidth || o.width) || 0) * (Number(o.vheight || o.height) || 0);
+            return s(b) - s(a);
+          });
+          const e = cand[0];
+          const token = String(e.main_url || e.play_url || "");
+          const seed = String(d.key_seed || (vi && vi.key_seed) || j.key_seed || "");
+          const url = await decodeQaab(token, seed);
+          if (url) return url;
+        } catch (e) {}
+      }
+      return "";
+    }, QAAB_SALT);
+  } catch (e) {
+    return "";
+  }
+}
+
 function videoUrls() {
   return page.evaluate(() => {
     const out = [];
@@ -941,6 +1055,7 @@ async function main() {
   let confirmTries = 0;
   let coverState = "";
   let pauseState = "";
+  let wmState = "";
   try {
     await page.click("css:.tiptap");
     await page.waitForTimeout(300);
@@ -978,6 +1093,16 @@ async function main() {
           /视频.{0,4}生成好了|视频已生成|生成完成|视频生成完成/.test((document.body.innerText || "").slice(-2000))
         );
         if (ready) {
+          // 优先走无水印：hook 抓到的 fallback_api + 页面内 AES 解密
+          const wm = await resolveUnwatermarked();
+          if (wm) {
+            hit = wm;
+            wmState = "ok";
+            coverClicked = true;
+            break;
+          }
+          wmState = "empty";
+          // 退路：点封面，拿页面上那个带水印的播放地址
           const ok = await page.evaluate(() => {
             const c = document.querySelector("img[class*=cover-]");
             if (!c) return false;
