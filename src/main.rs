@@ -393,6 +393,20 @@ fn route(stream: &mut TcpStream, req: Req) {
         return resp(stream, 204, "text/plain", b"");
     }
 
+    // 视频接口的所有请求都先记一条：客户端到底发了没有、发了什么，日志里要看得见
+    if p.starts_with("/v1/videos") {
+        let head = String::from_utf8_lossy(&req.body[..req.body.len().min(240)])
+            .replace(['\r', '\n'], " ");
+        util::log(&format!(
+            "[视频] 请求 {} {} · {}B · ct={} · body={}",
+            m,
+            p,
+            req.body.len(),
+            if req.ctype.is_empty() { "(无)" } else { req.ctype.as_str() },
+            head
+        ));
+    }
+
     if m == "GET" && (p == "/" || p == "/panel") {
         return resp(stream, 200, "text/html; charset=utf-8", PANEL.as_bytes());
     }
