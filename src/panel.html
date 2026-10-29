@@ -223,6 +223,13 @@ button.danger:hover{background:#fdf1f0}
         <input type="text" id="vidConvUrl" readonly>
         <button onclick="resetVidConv()">解绑</button>
       </div>
+      <div class="row" style="margin-top:8px">
+        <label>去水印</label>
+        <label style="display:flex;align-items:center;gap:6px;flex:1;font-weight:400;font-size:12.5px;color:#5f6f66">
+          <input type="checkbox" id="vidDewm" onchange="toggleDewm(this.checked)" style="width:auto;flex:none">
+          下载后用 ffmpeg 糊掉右下角「豆包 AI 生成」水印
+        </label>
+      </div>
     </div>
 
     <div class="card">
@@ -694,6 +701,11 @@ function refreshVideos(){
     });
   }).catch(function(){ toast('读取视频列表失败'); });
 }
+function toggleDewm(on){
+  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({videoDewatermark:!!on})})
+    .then(function(){ toast(on?'已开启去水印':'已关闭去水印'); })
+    .catch(function(){ toast('保存失败'); });
+}
 function resetVidConv(){
   api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({videoConversationUrl:''})})
     .then(function(){ toast('已解绑，下次重新找对话'); videoStatus(); })
@@ -710,6 +722,7 @@ function renderVideo(d){
     if(url) url.value=d.endpoint||'';
     if($('vidConv')) $('vidConv').value=d.conversationName||'视频专用';
     if($('vidConvUrl')) $('vidConvUrl').value=d.conversationUrl||'';
+    if($('vidDewm')) $('vidDewm').checked = d.dewatermark !== false;
   }else{
     lock.style.display='';
     body.style.display='none';

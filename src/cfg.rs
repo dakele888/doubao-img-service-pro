@@ -24,6 +24,8 @@ pub struct Config {
     pub video_conversation_name: String,
     /// 视频中转专用会话地址（跟生图分开存）
     pub video_conversation_url: String,
+    /// 视频下载后用 ffmpeg 把右下角的「豆包 AI 生成」水印模糊掉（需要机器上有 ffmpeg）
+    pub video_dewatermark: bool,
 }
 
 impl Default for Config {
@@ -42,6 +44,7 @@ impl Default for Config {
             image_tier: "ori".into(),
             video_conversation_name: "视频专用".into(),
             video_conversation_url: String::new(),
+            video_dewatermark: true,
         }
     }
 }
@@ -81,6 +84,7 @@ impl Config {
                 .unwrap_or_else(|| d.image_tier.clone()),
             video_conversation_name: s("videoConversationName", &d.video_conversation_name),
             video_conversation_url: s("videoConversationUrl", &d.video_conversation_url),
+            video_dewatermark: v.get("videoDewatermark").and_then(|x| x.as_bool()).unwrap_or(true),
         }
     }
 
@@ -99,6 +103,7 @@ impl Config {
             "imageTier": self.image_tier,
             "videoConversationName": self.video_conversation_name,
             "videoConversationUrl": self.video_conversation_url,
+            "videoDewatermark": self.video_dewatermark,
             // 派生字段：给回滚到旧版时保持语义（raw=无水印）
             "rawImage": self.image_tier == "raw",
         })
