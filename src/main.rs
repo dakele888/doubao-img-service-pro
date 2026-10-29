@@ -863,12 +863,13 @@ fn produce_image(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failu
         return Err(Failure { message: "没有拿到图片地址".into(), code: "GEN_FAILED".into() });
     }
     // 诊断：把页面上抓到的生成图 URL 都记下来，方便排查拿到的是不是缩略图
+    util::log(&format!("[原图] 档位={}", v.get("tier").and_then(|x| x.as_str()).unwrap_or("thumb")));
     if let Some(d) = v.get("rawDbg") {
         util::log(&format!(
-            "[原图] cached={} targets={} upgraded={} err={}",
+            "[原图] cached={} targets={} found={} err={}",
             d.get("cached").and_then(|x| x.as_bool()).unwrap_or(false),
             d.get("targets").and_then(|x| x.as_i64()).unwrap_or(-1),
-            v.get("upgraded").and_then(|x| x.as_bool()).unwrap_or(false),
+            d.get("found").map(|x| !x.is_null()).unwrap_or(false),
             d.get("err").and_then(|x| x.as_str()).unwrap_or("-")
         ));
     }

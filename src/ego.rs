@@ -131,13 +131,26 @@ const __needLogin = ((/扫码登录|手机号登录|立即登录|登录后即可
 async function main() {
   let needRename = false;
   let convHit = null;
-  // 嗅探页面自己的网络响应：豆包前端拉消息/作品列表时带 image_ori_raw（无水印原图档），
-  // 提前按图片 hash 缓存起来，生成完直接取，不用刷新页面。
+  // 嗅探页面自己的网络响应：豆包前端拉消息/作品列表时带全套图片档位，
+  // 提前按图片 hash 分档缓存（raw=无水印原图，ori=网页「下载原图」同档带水印），生成完直接取。
   try {
     await page.evaluate(() => {
       if (window.__mohaRawHook) return;
       window.__mohaRawHook = 1;
-      const RAW = (window.__mohaRaw = {});
+      const T = (window.__mohaTiers = window.__mohaTiers || { raw: {}, ori: {} });
+      function grab(item) {
+        try {
+          const r = item.image_ori_raw || (item.image && item.image.image_ori_raw);
+          const o = item.image_ori || (item.image && item.image.image_ori);
+          const put = (u, tier) => {
+            if (!u) return;
+            const m = String(u).match(/rc_gen_image\/([^?\/~]+)/);
+            if (m) T[tier][m[1]] = String(u);
+          };
+          put(r && r.url, "raw");
+          put(o && o.url, "ori");
+        } catch (e) {}
+      }
       function scan(obj) {
         try {
           if (!obj || typeof obj !== "object") return;
@@ -145,12 +158,7 @@ async function main() {
           for (const k in obj) {
             const v = obj[k];
             if (v && typeof v === "object") {
-              const r = v.image_ori_raw || (v.image && v.image.image_ori_raw);
-              const u = r && r.url;
-              if (u) {
-                const m = String(u).match(/rc_gen_image\/([^?\/~]+)/);
-                if (m) RAW[m[1]] = String(u);
-              }
+              grab(v);
               scan(v);
             }
           }
@@ -179,7 +187,7 @@ async function main() {
           this.addEventListener("load", () => {
             try {
               const t = this.responseText || "";
-              if (t.indexOf("image_ori_raw") >= 0 && t.length < 8e6) scan(JSON.parse(t));
+              if (t.indexOf("image_ori") >= 0 && t.length < 8e6) scan(JSON.parse(t));
             } catch (e) {}
           });
         } catch (e) {}
@@ -353,12 +361,16 @@ async function main() {
     // 列表里给的是 384x216 缩略图（CDN 模板 cthumb），签名绑定整条 URL，改参数只会 403。
     // 原图（image_raw 模板）的签名地址藏在 React 组件数据里：顺着 img 的 fiber 往上找。
     // 刚生成的图数据常常还没带 raw，等不到就刷新一次页面再找。
-    async function findRaw(key) {
-      return await page.evaluate((k) => {
+    // 按档位找同一张图的签名地址：先查嗅探缓存，再顺着 img 的 fiber 往上找。
+    // tier="raw" → image_raw 模板（无水印原图）；tier="ori" → cgen 模板（网页「下载原图」同档，带水印）。
+    // 都没有就刷新一次页面再找。
+    async function findTier(key, tier) {
+      const tpl = tier === "raw" ? "image_raw" : "cgen";
+      return await page.evaluate((arg) => {
         const res = { targets: 0, found: null, err: null, cached: false };
         try {
-          const RAW = window.__mohaRaw || {};
-          if (RAW[k]) { res.found = RAW[k]; res.cached = true; return res; }
+          const T = ((window.__mohaTiers || {})[arg.tier]) || {};
+          if (T[arg.key]) { res.found = T[arg.key]; res.cached = true; return res; }
           // 防止 fiber 对象图太大拖垮执行：限制访问节点数
           let budget = 200000;
           function walk(obj, key, out, depth, seen) {
@@ -371,7 +383,7 @@ async function main() {
               try {
                 const v = obj[kk];
                 if (typeof v === "string") {
-                  if (v.length < 3000 && v.indexOf("image_raw") >= 0 && v.indexOf("http") === 0 && v.indexOf(key) >= 0) out.push(v);
+                  if (v.length < 3000 && v.indexOf(arg.tpl) >= 0 && v.indexOf("http") === 0 && v.indexOf(key) >= 0) out.push(v);
                 } else if (v && typeof v === "object") {
                   walk(v, key, out, depth + 1, seen);
                 }
@@ -380,7 +392,7 @@ async function main() {
           }
           const targets = [...document.querySelectorAll("img")].filter((i) => {
             const s = i.currentSrc || i.src || "";
-            return s.indexOf(k) >= 0;
+            return s.indexOf(arg.key) >= 0;
           });
           res.targets = targets.length;
           for (let ti = targets.length - 1; ti >= 0; ti--) {
@@ -392,7 +404,7 @@ async function main() {
             let depth = 0;
             while (f && depth < 60 && !res.found && budget > 0) {
               const hits = [];
-              walk(f.memoizedProps, k, hits, 0, new Set());
+              walk(f.memoizedProps, arg.key, hits, 0, new Set());
               if (hits.length) res.found = hits[0];
               f = f.return;
               depth++;
@@ -402,24 +414,33 @@ async function main() {
           res.err = String((e && e.message) || e);
         }
         return res;
-      }, key);
+      }, { key: key, tier: tier, tpl: tpl });
     }
+    // 档位选择：默认 ori（同网页「下载原图」：全分辨率，带豆包AI生成水印）；
+    // 勾了「无水印原图」才用 raw。要的档找不到就退另一档（总比 384x216 缩略图强），最后退缩略图。
     let upgraded = null;
+    let tier = null;
     let rawDbg = null;
-    if (hit && WANT_RAW) {
+    if (hit) {
       const key = (hit.split("?")[0].split("/").pop() || "").split("~")[0];
       if (key) {
-        let r = await findRaw(key);
+        const want = WANT_RAW ? "raw" : "ori";
+        const alt = WANT_RAW ? "ori" : "raw";
+        let r = await findTier(key, want);
         rawDbg = r;
-        upgraded = r && r.found;
+        if (r && r.found) { upgraded = r.found; tier = want; }
         for (let i = 0; i < 2 && !upgraded; i++) {
           try {
             await page.reload();
             await page.waitForTimeout(4200);
           } catch (e) {}
-          r = await findRaw(key);
+          r = await findTier(key, want);
           rawDbg = r;
-          upgraded = r && r.found;
+          if (r && r.found) { upgraded = r.found; tier = want; }
+        }
+        if (!upgraded) {
+          r = await findTier(key, alt);
+          if (r && r.found) { upgraded = r.found; tier = alt; }
         }
       }
     }
@@ -441,7 +462,7 @@ async function main() {
     }
 
     if (!hit) emit({ ok: false, error: "等待超时，没抓到新生成的图片" });
-    else emit({ ok: true, url: finalUrl, thumbUrl: hit, upgraded: !!upgraded, rawDbg: rawDbg, urls: freshUrls, pageLabel: page.label, convUrl: convUrl, renamed: renamed, convHit: !!convHit, refs: REFS.length });
+    else emit({ ok: true, url: finalUrl, thumbUrl: hit, upgraded: !!upgraded, tier: tier || "thumb", rawDbg: rawDbg, urls: freshUrls, pageLabel: page.label, convUrl: convUrl, renamed: renamed, convHit: !!convHit, refs: REFS.length });
   } catch (e) {
     emit({ ok: false, error: "脚本异常：" + String((e && e.message) || e) });
   }

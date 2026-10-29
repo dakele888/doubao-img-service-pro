@@ -16,7 +16,8 @@ pub struct Config {
     pub ego_path: String,
     /// 启动时是否需要输密码（面板里可以关掉）
     pub require_password: bool,
-    /// 无水印原图：抓到图后升级到 image_ori_raw 档（关掉就用列表给的地址，省几秒）
+    /// 无水印原图（可选）：开启后接口返回 image_ori_raw 档（无水印）。
+    /// 默认关：接口返回 image_ori 档，同网页「下载原图」（全分辨率，带豆包AI生成水印）。
     pub raw_image: bool,
 }
 
@@ -33,7 +34,7 @@ impl Default for Config {
             direct_mode: false,
             ego_path: String::new(),
             require_password: true,
-            raw_image: true,
+            raw_image: false,
         }
     }
 }

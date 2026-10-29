@@ -96,6 +96,11 @@ button.danger:hover{background:#fdf1f0}
     <input type="text" id="baseUrl" readonly>
     <button onclick="copyBase()">复制</button>
   </div>
+  <div class="row" style="margin-bottom:4px">
+    <label>接口图片</label>
+    <label class="chk"><input type="checkbox" id="rawImage" onchange="saveRaw()"> 无水印原图（可选）</label>
+  </div>
+  <div class="hint" id="rawHint" style="margin-bottom:2px"></div>
   <div class="sep"></div>
   <div class="row">
     <label>ego 环境</label>
@@ -129,11 +134,6 @@ button.danger:hover{background:#fdf1f0}
     <label class="chk"><input type="checkbox" id="directMode" onchange="onDirect()"> 不落盘，直接返回豆包原始地址</label>
   </div>
   <div class="hint" id="directHint" style="margin-bottom:2px"></div>
-  <div class="row" style="margin-bottom:4px">
-    <label>图片档位</label>
-    <label class="chk"><input type="checkbox" id="rawImage" onchange="saveRaw()"> 无水印原图（默认开）</label>
-  </div>
-  <div class="hint" id="rawHint" style="margin-bottom:2px"></div>
   <div class="sep"></div>
   <div class="row">
     <label>缓存目录</label>
@@ -384,7 +384,7 @@ function load(){
     $('maxMB').value=d.cfg.maxMB;
     $('keepDays').value=d.cfg.keepDays;
     $('directMode').checked=!!d.cfg.directMode;
-    $('rawImage').checked=d.cfg.rawImage!==false;
+    $('rawImage').checked=d.cfg.rawImage===true;
     applyRawHint();
     applyDirectUI();
     $('baseUrl').value=BASE+'/v1';
@@ -453,15 +453,15 @@ function saveCache(){
   api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})
     .then(function(d){toast(d.ok?'已保存':'保存失败：'+d.error);load()});
 }
-// 原图档即时生效：改一下就存，不用点保存
+// 接口图片档位即时生效：改一下就存，不用点保存
 function saveRaw(){
   api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({rawImage:$('rawImage').checked})})
-    .then(function(d){toast(d.ok?(($('rawImage').checked?'已切换：无水印原图':'已切换：列表直出')+'，下次生成生效'):'保存失败：'+d.error)});
+    .then(function(d){toast(d.ok?(($('rawImage').checked?'已切换：接口返回无水印原图':'已切换：接口返回原图（带水印）')+'，下次生成生效'):'保存失败：'+d.error)});
 }
 function applyRawHint(){
   $('rawHint').textContent = $('rawImage').checked
-    ? '开启：抓到图后自动升级到无水印原图档（2048x2048 / 2848x1600，单张 2~5MB），偶尔要多花几秒。'
-    : '关闭：直接用豆包列表给的地址（384x216 缩略图档），最快。';
+    ? '已开：接口返回无水印原图（同分辨率去掉「豆包AI生成」水印），偶尔要多花几秒。'
+    : '默认：接口返回网页「下载原图」同档原图（2848x1600 全分辨率，右下角带「豆包AI生成」水印）。勾选则返回无水印版。';
 }
 function cleanup(){api('/api/cleanup',{method:'POST'}).then(function(d){toast('清理了 '+d.removed.length+' 张');load()})}
 function clearAll(){if(!confirm('清空缓存目录里的所有图片？'))return;api('/api/clear',{method:'POST'}).then(function(d){toast('已清空 '+d.removed+' 张');load()})}
