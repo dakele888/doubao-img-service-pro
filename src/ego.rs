@@ -77,7 +77,15 @@ pub fn build_video_script(
 }
 
 const TPL: &str = r##"
-const task = await taskSpace("@@SPACE@@");
+// 空间归属可能被 ego 判给用户（调试/手动操作后会这样），拿不到就按错误里的 id 接管回来
+const task = await (async () => {
+  try { return await taskSpace("@@SPACE@@"); }
+  catch (e) {
+    const m = String((e && e.message) || e).match(/belongs to the user \(id (\d+)\)/);
+    if (!m) throw e;
+    return await claimTaskSpace(Number(m[1]));
+  }
+})();
 // 接口返回的图片档位："ori"=网页「下载原图」同档（带水印）、"raw"=无水印原图、"thumb"=列表缩略图
 const WANT_TIER = "@@TIER@@";
 const PROMPT = @@PROMPT@@;
@@ -520,7 +528,15 @@ if (__needLogin) {
 // 视频中转脚本：和生图同一套路（占住对话页 → 切视频模式 → 发提示词 → 嗅探视频地址）。
 // 豆包的视频地址藏在页面 video 元素和接口响应里，抓法比图片宽一些。
 const VIDEO_TPL: &str = r##"
-const task = await taskSpace("@@SPACE@@");
+// 空间归属可能被 ego 判给用户（调试/手动操作后会这样），拿不到就按错误里的 id 接管回来
+const task = await (async () => {
+  try { return await taskSpace("@@SPACE@@"); }
+  catch (e) {
+    const m = String((e && e.message) || e).match(/belongs to the user \(id (\d+)\)/);
+    if (!m) throw e;
+    return await claimTaskSpace(Number(m[1]));
+  }
+})();
 const PROMPT = @@PROMPT@@;
 const PAGE_LABEL = @@PAGE@@;
 const CONV_NAME = @@NAME@@;
