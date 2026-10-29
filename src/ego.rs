@@ -713,6 +713,35 @@ async function enterVideoMode() {
   return { ok: false, clicked: tried };
 }
 
+// 首次用视频生成会弹「安全确认」（素材授权告知），必须点「确认」，否则流程卡住。
+// 弹窗可能在切模式时出现，也可能在提交时才出现，两处都查一遍。
+async function dismissSafetyDialog() {
+  for (let i = 0; i < 8; i++) {
+    const r = await page.evaluate(() => {
+      const t = (document.body.innerText || "").slice(-2500);
+      if (!/安全确认|充分授权|豆包使用规范/.test(t)) return "none";
+      const nodes = [...document.querySelectorAll("button,[role=button],div,span")];
+      for (const n of nodes) {
+        if (n.children.length !== 0) continue;
+        const s = (n.innerText || "").trim();
+        if (s !== "确认" && s !== "确定" && s !== "同意") continue;
+        const rc = n.getBoundingClientRect();
+        if (rc.width <= 0 || rc.height <= 0) continue;
+        (n.closest("button") || n).click();
+        return "clicked";
+      }
+      return "no-button";
+    });
+    if (r === "clicked") {
+      await page.waitForTimeout(700);
+      return true;
+    }
+    if (r === "none") return false;
+    await page.waitForTimeout(700);
+  }
+  return false;
+}
+
 try { await ensureChat(); } catch (e) {}
 
 // 未登录直接报错，别等十分钟
@@ -744,6 +773,8 @@ async function main() {
   await installHook();
 
   const mode = await enterVideoMode();
+  // 切到视频模式后可能立刻弹安全确认，先处理掉，不然输入框被遮罩挡住
+  const safetyAfterMode = await dismissSafetyDialog();
 
   // 记录发之前已有的视频地址，之后只认新增的
   const before = {};
@@ -758,6 +789,8 @@ async function main() {
     await page.keyboard.insertText(PROMPT);
     await page.waitForTimeout(600);
     await page.press("css:.tiptap", "Enter");
+    // 提交时也可能才弹安全确认
+    await dismissSafetyDialog();
   } catch (e) {
     emit({ ok: false, error: "输入提示词失败：" + String((e && e.message) || e) });
     return;
