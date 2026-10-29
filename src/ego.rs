@@ -11,17 +11,35 @@ use std::time::Duration;
 pub const MARK: &str = "__MOHA_IMG_RESULT__";
 pub const SPACE: &str = "moha-doubao-img";
 
-pub fn build_script(prompt: &str, page_label: &str, conv_name: &str, gen_timeout_ms: u64) -> String {
+/// 参考图：(文件名, MIME, base64)
+pub type RefImage = (String, String, String);
+
+pub fn build_script(
+    prompt: &str,
+    page_label: &str,
+    conv_name: &str,
+    gen_timeout_ms: u64,
+    refs: &[RefImage],
+) -> String {
     let prompt_json = serde_json::to_string(prompt).unwrap_or_else(|_| "\"\"".into());
     let page_json = serde_json::to_string(page_label).unwrap_or_else(|_| "\"p2\"".into());
     let name_json = serde_json::to_string(conv_name).unwrap_or_else(|_| "\"生图专用\"".into());
     let deadline = gen_timeout_ms.saturating_sub(60_000);
+
+    let refs_json = serde_json::to_string(
+        &refs
+            .iter()
+            .map(|(name, mime, data)| serde_json::json!({ "name": name, "mime": mime, "b64": data }))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".into());
 
     TPL.replace("@@SPACE@@", SPACE)
         .replace("@@MARK@@", MARK)
         .replace("@@PROMPT@@", &prompt_json)
         .replace("@@PAGE@@", &page_json)
         .replace("@@NAME@@", &name_json)
+        .replace("@@IMAGES@@", &refs_json)
         .replace("@@DEADLINE@@", &deadline.to_string())
 }
 
@@ -30,6 +48,7 @@ const task = await taskSpace("@@SPACE@@");
 const PROMPT = @@PROMPT@@;
 const PAGE_LABEL = @@PAGE@@;
 const CONV_NAME = @@NAME@@;
+const REFS = @@IMAGES@@;
 
 const pages = await task.pages();
 let page = pages.find((p) => p.label === PAGE_LABEL) || pages[0];
@@ -168,8 +187,79 @@ async function main() {
     });
   }
 
+  // 豆包的参考图只能靠「粘贴」进输入框，没有可用的文件选择器。
+  // 这里构造一个合成的 paste 事件，把图片当成剪贴板里的文件交给编辑器。
+  // 输入框里的参考图缩略图：短边 40~120px 的 blob 图
+  function attachCount() {
+    return page.evaluate(() =>
+      [...document.querySelectorAll("img")]
+        .filter((i) => /^blob:/.test(i.src || ""))
+        .filter((i) => {
+          const r = i.getBoundingClientRect();
+          return r.width > 30 && r.width < 130;
+        }).length
+    );
+  }
+
+  // 每次请求都从干净状态开始：上一轮若没发出去，缩略图会留在输入框里
+  async function clearStale() {
+    const n = await attachCount();
+    if (n === 0) return 0;
+    await page.reload();
+    await page.waitForTimeout(3800);
+    return n;
+  }
+
+  function blobCount() {
+    return page.evaluate(() =>
+      [...document.querySelectorAll("img")].filter((i) => /^(blob:|data:image\/)/.test(i.src || "")).length
+    );
+  }
+
+  async function attachRefs() {
+    if (!REFS.length) return { ok: true, n: 0 };
+    const before = await attachCount();
+    let dispatched = null;
+    for (let i = 0; i < REFS.length; i++) {
+      try { await page.click("css:.tiptap"); } catch (e) {}
+      await page.waitForTimeout(300);
+      dispatched = await page.evaluate((one) => {
+        const bin = atob(one.b64);
+        const arr = new Uint8Array(bin.length);
+        for (let k = 0; k < bin.length; k++) arr[k] = bin.charCodeAt(k);
+        const file = new File([arr], one.name || "ref.png", { type: one.mime || "image/png" });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        const ed = document.querySelector(".tiptap");
+        if (!ed) return { ok: false, why: "no-editor" };
+        ed.focus();
+        const ret = ed.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+        return { ok: true, ret: ret, size: file.size, type: file.type };
+      }, REFS[i]);
+      if (!dispatched || !dispatched.ok) {
+        return { ok: false, error: "找不到输入框，参考图没法粘贴" };
+      }
+      await page.waitForTimeout(1800);
+    }
+    // 缩略图是 img + blob:，等它渲染出来；最多等 18 秒
+    let after = before;
+    for (let k = 0; k < 30; k++) {
+      after = await attachCount();
+      if (after >= before + REFS.length) return { ok: true, n: REFS.length };
+      await page.waitForTimeout(600);
+    }
+    return {
+      ok: false,
+      error:
+        "参考图没出现在输入框（粘贴前 " + before + " 张，之后 " + after + " 张；派发结果 " +
+        JSON.stringify(dispatched) + "）",
+    };
+  }
+
   let renamed = null;
   try {
+    const stale = await clearStale();
+    if (stale) console.log("清掉输入框里残留的 " + stale + " 张参考图");
     if (!(await enterImageMode())) {
       const st = await page.evaluate(() => ({
         url: location.href,
@@ -182,6 +272,9 @@ async function main() {
 
     const before = {};
     (await collect()).forEach((s) => (before[s] = 1));
+
+    const rf = await attachRefs();
+    if (!rf.ok) { emit({ ok: false, error: rf.error }); return; }
 
     await page.click("css:.tiptap");
     await page.waitForTimeout(300);
@@ -213,7 +306,7 @@ async function main() {
     }
 
     if (!hit) emit({ ok: false, error: "等待超时，没抓到新生成的图片" });
-    else emit({ ok: true, url: hit, pageLabel: page.label, convUrl: convUrl, renamed: renamed, convHit: !!convHit });
+    else emit({ ok: true, url: hit, pageLabel: page.label, convUrl: convUrl, renamed: renamed, convHit: !!convHit, refs: REFS.length });
   } catch (e) {
     emit({ ok: false, error: "脚本异常：" + String((e && e.message) || e) });
   }

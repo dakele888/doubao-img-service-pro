@@ -60,6 +60,10 @@ button.danger:hover{background:#fdf1f0}
 .pill:hover{background:#e8f3ec}
 .pill.off{border-color:#e2d2b8;background:#fdf8f1;color:#a0703a}
 .pill.off:hover{background:#faf0e2}
+.pill.ver{border-color:#c9d6e4;background:#f3f7fb;color:#3a5a7a;font-weight:600}
+.pill.ver:hover{background:#e8f0f8}
+.pill.upd{border-color:#e8c9a0;background:#fff5e9;color:#a05a2c}
+.pill.upd:hover{background:#fdecd8}
 .help-btn:hover{background:#f1f6f2}
 .modal{position:fixed;inset:0;background:rgba(22,32,27,.45);display:none;align-items:center;justify-content:center;padding:20px;z-index:60}
 .modal.on{display:flex}
@@ -73,6 +77,7 @@ button.danger:hover{background:#fdf1f0}
 <div class="topbar">
   <h1>豆包生图服务</h1>
   <div class="top-actions">
+    <button id="verBtn" class="pill ver" onclick="verClick()" title="点击检查更新">检查更新</button>
     <button id="pwdToggle" class="pill" onclick="togglePwd()" title="开启后每次启动都要输密码；改完下次启动生效">启动密码 · 开</button>
     <button class="help-btn" onclick="openEgo()">ego 官网</button>
     <button class="help-btn" onclick="openHelp()">部署帮助</button>
@@ -186,6 +191,19 @@ button.danger:hover{background:#fdf1f0}
   </details>
 
   <details class="doc">
+    <summary>参考图（图生图）</summary>
+    <p>豆包的参考图只能在输入框里<b>粘贴</b>进去，接口这边已经封装好了：调用时多带一个图片字段即可，服务会先把图粘进输入框，再发提示词。</p>
+    <table>
+      <tr><td>图片地址</td><td><code>{"prompt":"改成水彩风","image":"https://x.com/a.png"}</code></td></tr>
+      <tr><td>base64</td><td><code>"image":"data:image/png;base64,iVBOR..."</code>，也可以不带 <code>data:</code> 前缀</td></tr>
+      <tr><td>多张参考</td><td><code>"images":["...","..."]</code>，最多 3 张</td></tr>
+      <tr><td>别名</td><td><code>image_url</code> / <code>init_image</code> / <code>reference_image</code> / <code>source_image</code> 都认</td></tr>
+      <tr><td>限制</td><td>单张 ≤ 8MB，只支持 PNG / JPEG / WEBP / GIF</td></tr>
+    </table>
+    <p>不想写代码也行：把图存到本地，用 <code>curl</code> 调一次就能验证；<code>/v1/images/edits</code> 和 <code>/v1/images/generations</code> 都指向同一个处理流程。</p>
+  </details>
+
+  <details class="doc">
     <summary>常见问题</summary>
     <table>
       <tr><td>返回 401 豆包还没登录</td><td>到 ego lite 里重新登录 <code>doubao.com</code>，再重试</td></tr>
@@ -251,6 +269,39 @@ function renderQueue(q){
 function tickQueue(){
   api('/api/queue').then(function(q){renderQueue(q)}).catch(function(){});
   setTimeout(tickQueue,2000);
+}
+var VER={current:'',latest:'',hasUpdate:false};
+function renderVer(d){
+  var b=document.getElementById('verBtn');
+  if(!b) return;
+  if(d) VER=d;
+  if(VER.hasUpdate){
+    b.textContent='↑ 新版本 v'+VER.latest;
+    b.classList.add('upd');
+    b.title='当前 v'+VER.current+'，点击去 Gitee 下载';
+  }else{
+    b.textContent='v'+(VER.current||'');
+    b.classList.remove('upd');
+    b.title='已是最新，点击重新检查';
+  }
+}
+function checkVer(manual){
+  var b=document.getElementById('verBtn');
+  if(manual&&b) b.textContent='检查中…';
+  api('/api/version').then(function(d){
+    renderVer(d);
+    if(manual) toast(d.hasUpdate?('发现新版本 v'+d.latest):('已是最新版本 v'+d.current));
+  }).catch(function(){
+    if(b) b.textContent='v'+(VER.current||'');
+    if(manual) toast('检查失败：网络不通或 Gitee 访问不了');
+  });
+}
+function verClick(){
+  if(VER.hasUpdate){
+    api('/api/release',{method:'POST'}).then(function(){toast('已在浏览器打开下载页');}).catch(function(){toast('打开失败');});
+    return;
+  }
+  checkVer(true);
 }
 function renderPwd(on){
   var b=document.getElementById('pwdToggle');
@@ -337,6 +388,7 @@ function del(n){api('/api/delete',{method:'POST',headers:{'content-type':'applic
 function reveal(){api('/api/reveal',{method:'POST'}).then(function(){toast('已打开目录')})}
 load();
 tickQueue();
+checkVer(false);
 if(location.hash==='#help')openHelp();
 // 心跳：面板开着时每分钟报一次，仅用于状态显示
 (function beat(){ fetch(BASE+'/api/ping').catch(function(){}); setTimeout(beat, 60000); })();

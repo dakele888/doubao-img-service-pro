@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -112,7 +113,13 @@ fn serve() {
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
-                thread::spawn(move || handle(s));
+                thread::spawn(move || {
+                    // 单个请求出问题不能把整个服务带走
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle(s)));
+                    if r.is_err() {
+                        util::log("[崩溃] 处理请求时发生 panic，已隔离");
+                    }
+                });
             }
             Err(_) => continue,
         }
@@ -416,6 +423,31 @@ fn route(stream: &mut TcpStream, req: Req) {
     }
 
     // 用系统默认浏览器打开 ego 官网文档（URL 写死，不接受外部传入）
+    if m == "GET" && p == "/api/version" {
+        let current = env!("CARGO_PKG_VERSION").to_string();
+        let latest = latest_release();
+        let has = latest.as_deref().map(|l| is_newer(l, &current)).unwrap_or(false);
+        return json_resp(
+            stream,
+            200,
+            &json!({
+                "current": current,
+                "latest": latest,
+                "hasUpdate": has,
+                "url": "https://gitee.com/super88888/doubao-img-service/releases",
+            }),
+        );
+    }
+
+    if m == "POST" && p == "/api/release" {
+        const REL: &str = "https://gitee.com/super88888/doubao-img-service/releases";
+        let ok = Command::new("cmd")
+            .args(["/c", "start", "", REL])
+            .spawn()
+            .is_ok();
+        return json_resp(stream, 200, &json!({ "ok": ok }));
+    }
+
     if m == "POST" && p == "/api/ego" {
         const EGO_DOC: &str = "https://lite.ego.app/document/zh/docs/windows/product-introduce";
         let ok = Command::new("cmd")
@@ -456,7 +488,7 @@ fn route(stream: &mut TcpStream, req: Req) {
         };
     }
 
-    if m == "POST" && p == "/v1/images/generations" {
+    if m == "POST" && (p == "/v1/images/generations" || p == "/v1/images/edits") {
         return generate(stream, &req.body);
     }
 
@@ -474,6 +506,11 @@ fn generate(stream: &mut TcpStream, body: &[u8]) {
     }
     let want_b64 = v.get("response_format").and_then(|x| x.as_str()) == Some("b64_json");
 
+    let refs = match collect_refs(&v) {
+        Ok(r) => r,
+        Err(e) => return json_resp(stream, 400, &json!({ "error": { "message": e } })),
+    };
+
     let ticket = match sched::enqueue(&prompt, MAX_QUEUE) {
         Ok(t) => t,
         Err(_) => {
@@ -487,7 +524,11 @@ fn generate(stream: &mut TcpStream, body: &[u8]) {
     if ticket.ahead > 0 {
         util::log(&format!("[队列] #{} 入队，前面 {} 个", ticket.seq, ticket.ahead));
     } else {
-        util::log(&format!("[生图] 收到：{}", prompt.chars().take(40).collect::<String>()));
+        util::log(&format!(
+            "[生图] 收到{}：{}",
+            if refs.is_empty() { String::new() } else { format!("（参考图 {} 张）", refs.len()) },
+            prompt.chars().take(40).collect::<String>()
+        ));
     }
 
     if sched::acquire(ticket.seq, QUEUE_WAIT_MS).is_err() {
@@ -500,12 +541,15 @@ fn generate(stream: &mut TcpStream, body: &[u8]) {
     }
 
     let started = util::now_ms();
-    let outcome = produce_image(&prompt);
+    // 不管中间怎么失败（包括 panic），队列槽位都要还回去，否则后面的请求会一直等
+    let mut slot = SlotGuard { released: false };
+    let outcome = produce_image(&prompt, &refs);
     let cost = ((util::now_ms().saturating_sub(started)) as f64) / 1000.0;
 
     match outcome {
         Ok(res) => {
             sched::release(true, cost);
+            slot.released = true;
             util::log(&format!(
                 "[生图] 完成（{:.1}s）{}",
                 cost,
@@ -545,6 +589,7 @@ fn generate(stream: &mut TcpStream, body: &[u8]) {
         }
         Err(f) => {
             sched::release(false, cost);
+            slot.released = true;
             util::log(&format!("[生图] 失败（{:.1}s）：{}", cost, f.message));
             let code = match f.code.as_str() {
                 "QUEUE_FULL" => 429,
@@ -557,6 +602,19 @@ fn generate(stream: &mut TcpStream, body: &[u8]) {
                 code,
                 &json!({ "error": { "message": f.message, "code": f.code } }),
             )
+        }
+    }
+}
+
+/// 队列槽位的兜底释放：正常路径里手动 release 后把 released 置 true
+struct SlotGuard {
+    released: bool,
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        if !self.released {
+            sched::release(false, 0.0);
         }
     }
 }
@@ -574,13 +632,13 @@ struct Failure {
     code: String,
 }
 
-fn produce_image(prompt: &str) -> Result<Produced, Failure> {
+fn produce_image(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failure> {
     let cfg = Config::load(&config_file());
     let bin = util::find_ego(&cfg);
 
     let mut last: Option<Value> = None;
     for attempt in 1..=3 {
-        let script = ego::build_script(prompt, &cfg.page_label, &cfg.conversation_name, GEN_TIMEOUT_MS);
+        let script = ego::build_script(prompt, &cfg.page_label, &cfg.conversation_name, GEN_TIMEOUT_MS, refs);
         let r = ego::run(&bin, &script, Duration::from_millis(GEN_TIMEOUT_MS));
         match r {
             Ok(v) => {
@@ -707,6 +765,178 @@ fn b64(data: &[u8]) -> String {
         out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
     }
     out
+}
+
+// ---------- 参考图 ----------
+const MAX_REFS: usize = 3;
+const MAX_REF_BYTES: usize = 8 * 1024 * 1024;
+
+fn b64_val(c: u8) -> Option<u8> {
+    match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' | b'-' => Some(62),
+        b'/' | b'_' => Some(63),
+        _ => None,
+    }
+}
+
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4 + 3);
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for &b in s.as_bytes() {
+        if b == b'=' {
+            break;
+        }
+        let v = b64_val(b)?;
+        buf = (buf << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+    Some(out)
+}
+
+fn sniff_mime(b: &[u8]) -> Option<&'static str> {
+    if b.len() > 8 && &b[..8] == b"\x89PNG\r\n\x1a\n" {
+        return Some("image/png");
+    }
+    if b.len() > 3 && &b[..3] == b"\xFF\xD8\xFF" {
+        return Some("image/jpeg");
+    }
+    if b.len() > 12 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if b.len() > 6 && (&b[..6] == b"GIF87a" || &b[..6] == b"GIF89a") {
+        return Some("image/gif");
+    }
+    None
+}
+
+/// 从请求体里取参考图：支持 data URL、纯 base64、http(s) 地址三种写法。
+fn collect_refs(v: &Value) -> Result<Vec<ego::RefImage>, String> {
+    let mut raw: Vec<String> = Vec::new();
+    for key in ["image", "image_url", "imageUrl", "init_image", "reference_image", "source_image"] {
+        if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() {
+                raw.push(s.to_string());
+            }
+        }
+    }
+    if let Some(arr) = v.get("images").and_then(|x| x.as_array()) {
+        for it in arr {
+            if let Some(s) = it.as_str() {
+                let s = s.trim();
+                if !s.is_empty() {
+                    raw.push(s.to_string());
+                }
+            }
+        }
+    }
+    if raw.len() > MAX_REFS {
+        return Err(format!("参考图最多 {} 张", MAX_REFS));
+    }
+
+    let mut out = Vec::new();
+    for (i, item) in raw.iter().enumerate() {
+        let mut declared: Option<String> = None;
+        let bytes = if item.starts_with("http://") || item.starts_with("https://") {
+            let dir = base_dir().join("_ref");
+            let _ = std::fs::create_dir_all(&dir);
+            let dest = dir.join(format!("r{}_{}.img", util::now_ms(), i));
+            util::download(item, &dest).map_err(|e| format!("参考图下载失败：{}", e))?;
+            let b = std::fs::read(&dest).map_err(|e| format!("参考图读取失败：{}", e))?;
+            let _ = std::fs::remove_file(&dest);
+            b
+        } else if let Some(rest) = item.strip_prefix("data:") {
+            let (head, payload) = rest.split_once(',').ok_or("参考图的 data URL 格式不对")?;
+            declared = head.split(';').next().map(|s| s.to_string());
+            let clean: String = payload.chars().filter(|c| !c.is_whitespace()).collect();
+            b64_decode(&clean).ok_or("参考图 base64 解不开")?
+        } else {
+            let clean: String = item.chars().filter(|c| !c.is_whitespace()).collect();
+            b64_decode(&clean).ok_or("参考图 base64 解不开")?
+        };
+
+        if bytes.len() > MAX_REF_BYTES {
+            return Err(format!("参考图太大（单张上限 {} MB）", MAX_REF_BYTES / 1024 / 1024));
+        }
+        let mime = match sniff_mime(&bytes) {
+            Some(m) => m.to_string(),
+            None => match declared.filter(|m| m.starts_with("image/")) {
+                Some(m) => m,
+                None => return Err("参考图格式不支持，只认 PNG / JPEG / WEBP / GIF".into()),
+            },
+        };
+        let ext = mime.rsplit('/').next().unwrap_or("png").to_string();
+        out.push((format!("ref{}.{}", i + 1, ext), mime, b64(&bytes)));
+    }
+    Ok(out)
+}
+
+// ---------- 版本检测 ----------
+static VER_CACHE: OnceLock<std::sync::Mutex<Option<(u64, Option<String>)>>> = OnceLock::new();
+
+fn ver_tuple(s: &str) -> Vec<u32> {
+    s.split(|c: char| !c.is_ascii_digit())
+        .filter(|x| !x.is_empty())
+        .filter_map(|x| x.parse().ok())
+        .collect()
+}
+
+fn is_newer(latest: &str, current: &str) -> bool {
+    let a = ver_tuple(latest);
+    let b = ver_tuple(current);
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+/// 查 Gitee 上最新发行版的 tag，10 分钟内复用缓存
+fn latest_release() -> Option<String> {
+    let m = VER_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(g) = m.lock() {
+        if let Some((at, v)) = g.as_ref() {
+            if util::now_ms().saturating_sub(*at) < 10 * 60 * 1000 {
+                return v.clone();
+            }
+        }
+    }
+    let out = Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time",
+            "8",
+            "-H",
+            "User-Agent: doubao-img",
+            "https://gitee.com/api/v5/repos/super88888/doubao-img-service/releases/latest",
+        ])
+        .creation_flags(util::CREATE_NO_WINDOW)
+        .output()
+        .ok();
+    let mut tag = None;
+    if let Some(o) = out {
+        if let Ok(v) = serde_json::from_slice::<Value>(&o.stdout) {
+            tag = v
+                .get("tag_name")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim_start_matches('v').to_string());
+        }
+    }
+    if let Ok(mut g) = m.lock() {
+        *g = Some((util::now_ms(), tag.clone()));
+    }
+    tag
 }
 
 static PANEL: &str = include_str!("panel.html");

@@ -9,13 +9,13 @@
      → 下载到缓存目录 → 返回图片地址
 ```
 
-界面是**程序自己的窗口**（Win32 外壳 + WebView2 渲染），双击就出，不需要浏览器、不需要记地址。**整个程序只有一个 exe（约 700 KB），不带任何外部 DLL。**
+界面是**程序自己的窗口**（Win32 外壳 + WebView2 渲染），双击就出，不需要浏览器、不需要记地址。**整个程序只有一个 exe（779 KB），不带任何外部 DLL。**支持文生图和参考图（图生图），调用方式见下文「参考图」一节。
 
 ## 下载
 
 不想自己编译，直接下现成的：
 
-**[⬇ 下载豆包生图服务.exe（719 KB）](https://gitee.com/super88888/doubao-img-service/releases)**
+**[⬇ 下载豆包生图服务.exe（779 KB）](https://gitee.com/super88888/doubao-img-service/releases)**
 
 进「发行版」页面，附件里就是 exe。直链（版本升级会变）：
 
@@ -78,11 +78,11 @@ node -e "const c=require('crypto');console.log(c.createHash('md5').update('douba
 
 ## 换一台电脑 / 发给别人用
 
-**不是拷个 exe 就能用**。exe 本身只有 697KB，真正操作豆包的是 `ego-browser`，它属于 **ego lite**（装了 597MB，一份 Chromium）。所以目标机必须补齐三样：
+**不是拷个 exe 就能用**。exe 本身只有 779KB，真正操作豆包的是 `ego-browser`，它属于 **ego lite**（装了 597MB，一份 Chromium）。所以目标机必须补齐三样：
 
 | 需要的东西 | 体积 | 说明 |
 | --- | --- | --- |
-| 本 exe | **697 KB** | 就这一个文件，Rust 编译，不依赖 Node / .NET / VC 运行库 / 外部 DLL |
+| 本 exe | **779 KB** | 就这一个文件，Rust 编译，不依赖 Node / .NET / VC 运行库 / 外部 DLL |
 | **ego lite** | ~597 MB | 必须装。装完 `ego-browser` 才会出现，它是全流程的浏览器驱动 |
 | **豆包登录** | — | 在 ego 浏览器里打开 `doubao.com` 扫码登录，不登录什么也生成不了 |
 | WebView2 运行时 | 系统自带 | Windows 10/11 装了 Edge 就有，界面靠它渲染；缺了会自动退回浏览器窗口 |
@@ -117,7 +117,7 @@ node -e "const c=require('crypto');console.log(c.createHash('md5').update('douba
 | --- | --- |
 | **部署帮助**（右上角按钮） | 弹层形式的完整使用说明：三步装好、接到魔哈、常见问题、工作原理与限制 |
 | 状态 | 缓存目录、已缓存张数与占用、**ego 路径与可用性**（可手动指定）、实时队列；一键复制 Base URL |
-| 顶部按钮 | **启动密码开关**（开/关，点一下切换）、**ego 官网**（用默认浏览器打开官方文档）、部署帮助 |
+| 顶部按钮 | **版本号 / 检查更新**（有新版会变成橙色「↑ 新版本 vX」，点一下去下载）、**启动密码开关**、**ego 官网**、部署帮助 |
 | 对话 | 改专用对话名（默认「生图专用」）；看当前对话地址；「解绑」= 下次重新找 |
 | 缓存 | 改缓存目录、最多保留张数、最大占用 MB、保留天数；立即清理；清空全部 |
 | 已缓存图片 | 缩略图列表，单张删除 |
@@ -146,6 +146,28 @@ node -e "const c=require('crypto');console.log(c.createHash('md5').update('douba
 | 保留天数 | 0（不限） | 超过天数的先删 |
 
 每次生成**下载完成后自动清理**，顺序是：先按天数删，再按张数删，最后按体积删，都是**从最旧的开始**。面板「立即清理」等于手动跑一遍。
+
+## 参考图（图生图）
+
+豆包的参考图只能在输入框里**粘贴**，没有可用的文件选择器。服务把这个动作封装好了：请求里带图片，它先把图粘进输入框，等缩略图出来，再填提示词发送。
+
+| 传法 | 例子 |
+| --- | --- |
+| 图片地址 | `{"prompt":"改成水彩风","image":"https://x.com/a.png"}` |
+| base64 | `{"prompt":"改成水彩风","image":"data:image/jpeg;base64,/9j/4AA..."}` |
+| 多张 | `{"prompt":"合成一张","images":["...","..."]}`，最多 3 张 |
+
+字段名 `image` / `image_url` / `init_image` / `reference_image` / `source_image` 都认，`images` 支持数组。
+
+| 项目 | 说明 |
+| --- | --- |
+| 格式 | 只支持 PNG / JPEG / WEBP / GIF，按文件头识别，不看扩展名 |
+| 单张大小 | ≤ 8MB |
+| 张数 | 每次请求最多 3 张，**这次请求带几张就粘几张** |
+| 残留清理 | 上一轮若没发出去，缩略图会留在输入框里；下一轮开始前会自动刷新页面清空，保证不多不少 |
+| 耗时 | 比纯文字多 5~15 秒（要等图片上传），单张参考图实测 30~46 秒 |
+
+参考图必须和提示词一起发（豆包一次只处理输入框里的内容），不支持「先传图、再单独发文字」。
 
 ## 魔哈里怎么填
 
@@ -184,7 +206,8 @@ node -e "const c=require('crypto');console.log(c.createHash('md5').update('douba
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/v1/images/generations` | `{prompt, n}` → `{data:[{url}]}`，`response_format=b64_json` 时附 base64 |
+| POST | `/v1/images/generations` | `{prompt, n, image?}` → `{data:[{url}]}`，`response_format=b64_json` 时附 base64 |
+| POST | `/v1/images/edits` | 同一条处理流程（参考图也走这里） |
 | GET | `/` | 管理面板 |
 | GET | `/health` | 健康检查 |
 | GET | `/api/config` | 配置 + 缓存统计 + 图片列表 + 队列快照 |
@@ -195,6 +218,8 @@ node -e "const c=require('crypto');console.log(c.createHash('md5').update('douba
 | POST | `/api/cleanup` | 按策略清理 |
 | POST | `/api/clear` | 清空全部 |
 | POST | `/api/reveal` | 打开缓存目录 |
+| GET | `/api/version` | 当前版本 / Gitee 最新版本 / 是否有更新（结果缓存 10 分钟） |
+| POST | `/api/release` | 用默认浏览器打开 Gitee 发行版页面 |
 | GET | `/files/<name>` | 取图 |
 
 端口固定 `8788`（监听 `127.0.0.1`，仅本机可访问）。排队上限 30、单张生成超时 240 秒、排队等待上限 30 分钟，都是 `src/main.rs` 顶部的常量，要改直接改那里重新编译。
@@ -248,4 +273,5 @@ powershell -ExecutionPolicy Bypass -File build.ps1   # 编译 + 补图标 + 输�
 - 依赖网页结构，豆包改版就可能失效
 - 是自动化操作个人账号，频率高了有风控风险，别当生产接口
 - 服务串行执行，并发会排队
+- 参考图靠模拟粘贴，豆包改输入框结构就可能失效，日志会写「参考图没出现在输入框」
 - **不能只拷 exe 到新电脑就用**，目标机必须先有 ego lite 和已登录的豆包（见上文「换一台电脑」）
