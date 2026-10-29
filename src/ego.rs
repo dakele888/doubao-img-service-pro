@@ -742,12 +742,70 @@ async function dismissSafetyDialog() {
   return false;
 }
 
+// 按请求里的 model 切豆包视频模型。
+// 豆包可选：Seedance 2.5（5 倍消耗）/ Seedance 2.0（2 倍）/ Seedance 2.0 Fast / Seedance 2.0 Mini
+// 关键词映射，认不出就保持当前模型不动（模型影响消耗，不能乱切）。
+async function pickModel() {
+  const mm = PROMPT.match(/模型\s*([A-Za-z0-9._\- ]{2,40})/);
+  const want = mm ? mm[1].trim().toLowerCase() : "";
+  if (!want) return "";
+  let target = "";
+  if (want.indexOf("fast") >= 0) target = "Seedance 2.0 Fast";
+  else if (want.indexOf("2.5") >= 0) target = "Seedance 2.5";
+  else if (want.indexOf("mini") >= 0) target = "Seedance 2.0 Mini";
+  else if (want.indexOf("seedance") >= 0 || want.indexOf("2.0") >= 0 || want.indexOf("sd2") >= 0) target = "Seedance 2.0";
+  if (!target) return "";
+
+  const cur = await page.evaluate(() => {
+    for (const n of [...document.querySelectorAll("span,div")]) {
+      if (n.children.length !== 0) continue;
+      const t = (n.innerText || "").trim();
+      if (/^Seedance/.test(t) && n.getBoundingClientRect().width > 0) return t;
+    }
+    return "";
+  });
+  if (cur === target) return target;
+
+  const opened = await page.evaluate(() => {
+    for (const n of [...document.querySelectorAll("span,div,button")]) {
+      if (n.children.length !== 0) continue;
+      if (!/^Seedance/.test((n.innerText || "").trim())) continue;
+      if (n.getBoundingClientRect().width <= 0) continue;
+      const t = n.closest("button") || n.parentElement || n;
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        t.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      }
+      return true;
+    }
+    return false;
+  });
+  if (!opened) return "";
+  await page.waitForTimeout(900);
+
+  const ok = await page.evaluate((t) => {
+    for (const n of [...document.querySelectorAll("button,div,span")]) {
+      if (n.children.length !== 0) continue;
+      if ((n.innerText || "").trim() !== t) continue;
+      if (n.getBoundingClientRect().width <= 0) continue;
+      (n.closest("button") || n.parentElement || n).click();
+      return true;
+    }
+    return false;
+  }, target);
+  await page.waitForTimeout(600);
+  try { await page.keyboard.press("Escape"); } catch (e) {}
+  await page.waitForTimeout(300);
+  return ok ? target : "";
+}
+
 // 设置画面参数：输入框上方有「自动 · Ns」控件，点开是「比例 + 时长」面板。
 // 比例是 7 个按钮（自动/3:4/4:3/9:16/16:9/1:1/21:9），时长是 4~15s 的自定义滑杆。
 // 参数从提示词前缀里取（服务端已拼成「（画面比例 9:16，分辨率 720p，时长 12 秒）…」）。
 // 任何一步失败都不阻断生成，只写进返回值。
 async function setVideoParams() {
-  const res = { panel: false, ratio: "", duration: 0 };
+  const res = { model: "", panel: false, ratio: "", duration: 0 };
+  // 先按请求切模型（认不出就保持原样），再设比例和时长
+  res.model = await pickModel();
   const am = PROMPT.match(/画面比例\s*([0-9]+:[0-9]+)/);
   const aspect = am ? am[1] : "";
   const dm = PROMPT.match(/时长\s*([0-9]+)\s*秒/);

@@ -979,8 +979,11 @@ fn normalize_picture_tokens(prompt: &str) -> String {
 
 /// 把画面参数转成一句自然语言垫在提示词前面。
 /// 豆包网页版没有可靠的比例/时长控件，用文字约束最稳。
-fn prompt_with_params(prompt: &str, aspect: &str, dur: &str, res: &str) -> String {
+fn prompt_with_params(prompt: &str, aspect: &str, dur: &str, res: &str, model: &str) -> String {
     let mut tags: Vec<String> = Vec::new();
+    if !model.is_empty() && model != "doubao-video" {
+        tags.push(format!("模型 {}", model));
+    }
     if !aspect.is_empty() {
         tags.push(format!("画面比例 {}", aspect));
     }
@@ -1110,8 +1113,7 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
         .unwrap_or("doubao-video")
         .to_string();
     // 画面参数垫在提示词前面（豆包网页没有可靠的比例/时长控件）
-    let full_prompt = prompt_with_params(&prompt, &aspect, &seconds, &resolution);
-
+    let full_prompt = prompt_with_params(&prompt, &aspect, &seconds, &resolution, &model);
     let seq = VIDEO_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = format!("video_{}_{}", util::now_ms(), seq);
     let job = VideoJob {
@@ -1308,7 +1310,12 @@ fn generate_video(stream: &mut TcpStream, req: &Req) {
         Some(Value::Number(n)) => n.to_string(),
         _ => "".to_string(),
     };
-    let full_prompt = prompt_with_params(&prompt, &aspect, &seconds, &resolution);
+    let model = body_json
+        .get("model")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let full_prompt = prompt_with_params(&prompt, &aspect, &seconds, &resolution, &model);
 
     util::log(&format!(
         "[视频] 收到{}：{}",
@@ -2452,7 +2459,8 @@ mod video_prompt_tests {
 
     #[test]
     fn params_prefix() {
-        assert_eq!(prompt_with_params("跑步", "9:16", "8", "720p"), "（画面比例 9:16，分辨率 720p，时长 8 秒）跑步");
-        assert_eq!(prompt_with_params("跑步", "", "", ""), "跑步");
+        assert_eq!(prompt_with_params("跑步", "9:16", "8", "720p", ""), "（画面比例 9:16，分辨率 720p，时长 8 秒）跑步");
+        assert_eq!(prompt_with_params("跑步", "", "", "", ""), "跑步");
+        assert_eq!(prompt_with_params("跑步", "", "", "", "seedance-2.0-fast"), "（模型 seedance-2.0-fast）跑步");
     }
 }
