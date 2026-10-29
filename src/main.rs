@@ -706,6 +706,27 @@ fn route(stream: &mut TcpStream, req: Req) {
         return generate_video(stream, &req);
     }
 
+    // OpenAI 通用视频接口（异步任务制）
+    if m == "POST" && p == "/v1/videos" {
+        return video_create(stream, &req);
+    }
+    if m == "GET" && p == "/v1/videos" {
+        return video_list(stream);
+    }
+    if let Some(rest) = p.strip_prefix("/v1/videos/") {
+        if rest != "generations" && !rest.is_empty() {
+            if let Some(id) = rest.strip_suffix("/content") {
+                if m == "GET" {
+                    return video_content(stream, id);
+                }
+            } else if m == "GET" {
+                return video_get(stream, rest);
+            } else if m == "DELETE" {
+                return video_delete(stream, rest);
+            }
+        }
+    }
+
     json_resp(stream, 404, &json!({ "error": "not found" }))
 }
 
@@ -853,6 +874,254 @@ fn generate(stream: &mut TcpStream, req: &Req) {
                 &json!({ "error": { "message": f.message, "code": f.code } }),
             )
         }
+    }
+}
+
+// ---------------- OpenAI 通用视频接口（异步任务制） ----------------
+// POST   /v1/videos              创建任务 → 返回 job（status=queued）
+// GET    /v1/videos/{id}         查询任务状态
+// GET    /v1/videos/{id}/content 下载视频文件
+// GET    /v1/videos              列出任务
+// DELETE /v1/videos/{id}         删除任务记录
+
+#[derive(Clone)]
+struct VideoJob {
+    id: String,
+    created_at: i64,
+    status: String,
+    progress: u8,
+    seconds: String,
+    size: String,
+    model: String,
+    prompt: String,
+    url: String,
+    error: Option<String>,
+}
+
+impl VideoJob {
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "object": "video",
+            "created_at": self.created_at,
+            "status": self.status,
+            "progress": self.progress,
+            "seconds": self.seconds,
+            "size": self.size,
+            "model": self.model,
+            "prompt": self.prompt,
+            "url": self.url,
+            "error": self.error,
+        })
+    }
+}
+
+static VIDEO_JOBS: OnceLock<std::sync::Mutex<Vec<VideoJob>>> = OnceLock::new();
+static VIDEO_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn video_jobs() -> &'static std::sync::Mutex<Vec<VideoJob>> {
+    VIDEO_JOBS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+fn video_job_update<F: FnOnce(&mut VideoJob)>(id: &str, f: F) {
+    if let Ok(mut g) = video_jobs().lock() {
+        if let Some(j) = g.iter_mut().find(|x| x.id == id) {
+            f(j);
+        }
+    }
+}
+
+fn video_job_get(id: &str) -> Option<VideoJob> {
+    video_jobs().lock().ok().and_then(|g| g.iter().find(|x| x.id == id).cloned())
+}
+
+fn video_create(stream: &mut TcpStream, req: &Req) {
+    let low = req.ctype.to_lowercase();
+    let is_json_body = req.body.first().map(|b| *b == b'{').unwrap_or(false);
+
+    let parsed = if low.contains("multipart/form-data") {
+        parse_multipart_req(&req.body, &req.ctype)
+    } else if low.contains("json") || is_json_body || req.body.is_empty() {
+        parse_json_req(&req.body)
+    } else {
+        parse_json_req(&req.body).or_else(|_| parse_multipart_req(&req.body, &req.ctype))
+    };
+    let (prompt, _want_b64, refs) = match parsed {
+        Ok(x) => x,
+        Err(e) => {
+            return json_resp(
+                stream,
+                400,
+                &json!({ "error": { "message": e, "type": "invalid_request_error" } }),
+            )
+        }
+    };
+    let prompt = prompt.trim().to_string();
+    if prompt.is_empty() {
+        return json_resp(
+            stream,
+            400,
+            &json!({ "error": { "message": "prompt 不能为空", "type": "invalid_request_error" } }),
+        );
+    }
+
+    // 可选参数原样回显（不真正控制豆包，只是为了符合 OpenAI 的响应结构）
+    let (size, seconds, model) = if is_json_body {
+        let v: Value = serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}));
+        let sec = match v.get("seconds") {
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Number(n)) => n.to_string(),
+            _ => "8".to_string(),
+        };
+        (
+            v.get("size").and_then(|x| x.as_str()).unwrap_or("1280x720").to_string(),
+            sec,
+            v.get("model").and_then(|x| x.as_str()).unwrap_or("doubao-video").to_string(),
+        )
+    } else {
+        ("1280x720".to_string(), "8".to_string(), "doubao-video".to_string())
+    };
+
+    let seq = VIDEO_SEQ.fetch_add(1, Ordering::Relaxed);
+    let id = format!("video_{}_{}", util::now_ms(), seq);
+    let job = VideoJob {
+        id: id.clone(),
+        created_at: (util::now_ms() / 1000) as i64,
+        status: "queued".into(),
+        progress: 0,
+        seconds,
+        size,
+        model,
+        prompt: prompt.clone(),
+        url: String::new(),
+        error: None,
+    };
+    if let Ok(mut g) = video_jobs().lock() {
+        // 只留最近 50 个，避免内存无限涨
+        if g.len() >= 50 {
+            g.remove(0);
+        }
+        g.push(job.clone());
+    }
+
+    util::log(&format!(
+        "[视频] 建任务 {}：{}（参考图 {} 张）",
+        id,
+        prompt.chars().take(30).collect::<String>(),
+        refs.len()
+    ));
+
+    // 后台跑，立刻返回 queued
+    let id2 = id.clone();
+    thread::spawn(move || {
+        video_job_update(&id2, |j| {
+            j.status = "in_progress".into();
+            j.progress = 10;
+        });
+        let _guard = VIDEO_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let started = util::now_ms();
+        match produce_video(&prompt, &refs) {
+            Ok(res) => {
+                let cost = ((util::now_ms().saturating_sub(started)) as f64) / 1000.0;
+                util::log(&format!("[视频] 任务 {} 完成（{:.1}s）{}", id2, cost, res.name));
+                let url = format!("http://{}:{}/files/{}", HOST, port(), res.name);
+                video_job_update(&id2, |j| {
+                    j.status = "completed".into();
+                    j.progress = 100;
+                    j.url = url;
+                });
+            }
+            Err(f) => {
+                let cost = ((util::now_ms().saturating_sub(started)) as f64) / 1000.0;
+                util::log(&format!("[视频] 任务 {} 失败（{:.1}s）：{}", id2, cost, f.message));
+                video_job_update(&id2, |j| {
+                    j.status = "failed".into();
+                    j.error = Some(f.message);
+                });
+            }
+        }
+    });
+
+    json_resp(stream, 200, &job.to_json())
+}
+
+fn video_get(stream: &mut TcpStream, id: &str) {
+    match video_job_get(id) {
+        Some(j) => json_resp(stream, 200, &j.to_json()),
+        None => json_resp(
+            stream,
+            404,
+            &json!({ "error": { "message": format!("没有这个视频任务：{}", id), "code": "NOT_FOUND" } }),
+        ),
+    }
+}
+
+fn video_content(stream: &mut TcpStream, id: &str) {
+    let job = match video_job_get(id) {
+        Some(j) => j,
+        None => {
+            return json_resp(
+                stream,
+                404,
+                &json!({ "error": { "message": format!("没有这个视频任务：{}", id), "code": "NOT_FOUND" } }),
+            )
+        }
+    };
+    if job.status == "failed" {
+        return json_resp(
+            stream,
+            400,
+            &json!({ "error": { "message": job.error.clone().unwrap_or_else(|| "视频生成失败".into()), "code": "VIDEO_FAILED" } }),
+        );
+    }
+    if job.status != "completed" || job.url.is_empty() {
+        return json_resp(
+            stream,
+            409,
+            &json!({ "error": { "message": "视频还没生成完，稍后再取", "code": "NOT_READY", "status": job.status } }),
+        );
+    }
+    let name = job.url.rsplit('/').next().unwrap_or("").to_string();
+    let cfg = Config::load(&config_file());
+    let file = out_dir(&cfg).join(&name);
+    match std::fs::read(&file) {
+        Ok(buf) => resp(stream, 200, "video/mp4", &buf),
+        Err(_) => json_resp(
+            stream,
+            404,
+            &json!({ "error": { "message": "视频文件已被清理，请重新生成", "code": "FILE_GONE" } }),
+        ),
+    }
+}
+
+fn video_list(stream: &mut TcpStream) {
+    let data: Vec<Value> = video_jobs()
+        .lock()
+        .map(|g| g.iter().rev().map(|j| j.to_json()).collect())
+        .unwrap_or_default();
+    json_resp(stream, 200, &json!({ "object": "list", "data": data }));
+}
+
+fn video_delete(stream: &mut TcpStream, id: &str) {
+    let removed = video_jobs()
+        .lock()
+        .map(|mut g| {
+            let before = g.len();
+            g.retain(|x| x.id != id);
+            g.len() != before
+        })
+        .unwrap_or(false);
+    if removed {
+        json_resp(stream, 200, &json!({ "id": id, "object": "video.deleted", "deleted": true }))
+    } else {
+        json_resp(
+            stream,
+            404,
+            &json!({ "error": { "message": format!("没有这个视频任务：{}", id), "code": "NOT_FOUND" } }),
+        )
     }
 }
 
@@ -1151,7 +1420,7 @@ fn reason(code: u16) -> &'static str {
 
 fn resp(stream: &mut TcpStream, code: u16, ct: &str, body: &[u8]) {
     let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: content-type, authorization\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: content-type, authorization\r\nAccess-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
         code,
         reason(code),
         ct,

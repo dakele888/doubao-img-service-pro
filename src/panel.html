@@ -201,9 +201,13 @@ button.danger:hover{background:#fdf1f0}
       <button class="primary" onclick="saveVidConv()">保存</button>
     </div>
     <div class="hint" style="margin-bottom:8px">视频生成很慢（通常 1~5 分钟），同一时间只跑一个请求，请耐心等。<b>支持多张参考图</b>（最多 9 张，用 <code>"images":[...]</code> 传）。</div>
-    <div class="hint">用法：POST <code>/v1/videos/generations</code>，跟生图接口一样的 body：<br>
-      <code>{"prompt":"一只猫在草地上奔跑"}</code><br>
-      返回：<code>{"data":[{"url":"http://127.0.0.1:8788/files/xxxx.mp4"}]}</code></div>
+    <div class="hint">
+      <b>① OpenAI 标准（异步任务）</b><br>
+      <code>POST /v1/videos</code> 建任务 → <code>GET /v1/videos/{id}</code> 查进度 → <code>GET /v1/videos/{id}/content</code> 下载视频<br>
+      <b>② 同步简化</b><br>
+      <code>POST /v1/videos/generations</code>，一直等到出结果再返回文件地址<br>
+      <span style="color:#7b8a82">body 都是 <code>{"prompt":"一只猫在草地上奔跑"}</code>，可选 size / seconds / model（仅回显，不控制豆包）</span>
+    </div>
   </div>
 </div>
 
