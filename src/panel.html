@@ -14,7 +14,7 @@ h1{font-size:15px;margin:0 0 2px}
 .row>label{width:78px;color:#4c5a53;font-size:12.5px;flex:0 0 auto}
 .row>label.chk{width:auto;flex:1 1 auto;min-width:0}
 input[type=text],input[type=number],select{border:1px solid #d3ddd7;border-radius:6px;padding:5px 8px;font-size:12.5px;font-family:inherit;background:#fbfcfb;color:#2c3a32}
-select{cursor:pointer}
+select{flex:1;min-width:180px;cursor:pointer}
 input[type=text]{flex:1;min-width:180px}
 input[type=number]{width:84px}
 .hint{color:#8a978f;font-size:12px}
@@ -54,6 +54,12 @@ button.danger:hover{background:#fdf1f0}
 .doc td{padding:4px 6px;border-bottom:1px solid #f2f5f3;color:#4c5a53;vertical-align:top;line-height:1.6}
 .doc td:first-child{width:36%;color:#2c3a32}
 .topbar{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.card-h2{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px}
+.card-h2 h2{margin:0}
+.trio{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:4px}
+.trio .t{display:flex;align-items:center;gap:6px}
+.trio .t>label{color:#4c5a53;font-size:12.5px;flex:0 0 auto}
+.btns{display:flex;gap:8px;justify-content:flex-end;margin-top:6px}
 .topbar h1{margin:0}
 .help-btn{font-size:12px;padding:4px 11px;border-color:#c8d6ce;color:#2f6b3f}
 .top-actions{display:flex;align-items:center;gap:8px}
@@ -90,8 +96,10 @@ button.danger:hover{background:#fdf1f0}
   <h2>状态</h2>
   <div class="kv" id="status">加载中…</div>
   <div class="kv" id="qline" style="margin-top:6px"></div>
-  <div class="sep"></div>
-  <div class="sep"></div>
+</div>
+
+<div class="card">
+  <h2>接口</h2>
   <div class="row">
     <label>接口地址</label>
     <input type="text" id="baseUrl" readonly>
@@ -105,31 +113,30 @@ button.danger:hover{background:#fdf1f0}
       <option value="thumb">缩略图 · 最快（384x216）</option>
     </select>
   </div>
-  <div class="hint" id="rawHint" style="margin-bottom:2px"></div>
+  <div class="hint" id="rawHint" style="margin-bottom:8px"></div>
+  <div class="hint">魔哈里选「自定义生图接口」，Base URL 填上面这个，API Key / 模型名随便填。<b>并发数填几都行</b>——豆包页签只有一个，服务内部自动排队，不会互相抢图。</div>
+</div>
+
+<div class="card">
+  <h2>生成设置</h2>
+  <div class="row">
+    <label>专用对话名</label>
+    <input type="text" id="convName" placeholder="生图专用">
+    <button class="primary" onclick="saveConv()">保存</button>
+  </div>
+  <div class="hint" style="margin-bottom:8px">有这个名字的对话就一直复用它；没有就自动新建一条，生成完自动改名。留空则每次新建。</div>
+  <div class="row">
+    <label>当前对话地址</label>
+    <input type="text" id="convUrl" readonly>
+    <button onclick="resetConv()">解绑</button>
+  </div>
   <div class="sep"></div>
   <div class="row">
     <label>ego 环境</label>
     <input type="text" id="egoPath" placeholder="留空 = 自动查找">
     <button onclick="saveEgo()">检测</button>
   </div>
-  <div class="hint" id="egoHint" style="margin:0 0 10px;word-break:break-all"></div>
-  <div class="hint">魔哈里选「自定义生图接口」，Base URL 填上面这个，API Key / 模型名随便填。<b>并发数填几都行</b>——豆包页签只有一个，服务内部自动排队，不会互相抢图。</div>
-</div>
-
-<div class="card">
-  <h2>对话</h2>
-  <div class="row">
-    <label>专用对话名</label>
-    <input type="text" id="convName" placeholder="生图专用">
-    <button class="primary" onclick="saveConv()">保存</button>
-  </div>
-  <div class="hint">有这个名字的对话就一直复用它；没有就自动新建一条，生成完自动改名。留空则每次新建。</div>
-  <div class="sep"></div>
-  <div class="row">
-    <label>当前对话地址</label>
-    <input type="text" id="convUrl" readonly>
-    <button onclick="resetConv()">解绑</button>
-  </div>
+  <div class="hint" id="egoHint" style="word-break:break-all"></div>
 </div>
 
 <div class="card">
@@ -145,29 +152,22 @@ button.danger:hover{background:#fdf1f0}
     <input type="text" id="outDir" placeholder="留空 = 程序目录\out">
     <button onclick="reveal()">打开目录</button>
   </div>
-  <div class="row">
-    <label>最多保留</label>
-    <input type="number" id="maxFiles" min="0" step="10"> <span class="hint">张（0 = 不限）</span>
+  <div class="trio">
+    <div class="t"><label>最多保留</label><input type="number" id="maxFiles" min="0" step="10"><span class="hint">张</span></div>
+    <div class="t"><label>最大占用</label><input type="number" id="maxMB" min="0" step="128"><span class="hint">MB</span></div>
+    <div class="t"><label>保留天数</label><input type="number" id="keepDays" min="0" step="1"><span class="hint">天</span></div>
   </div>
-  <div class="row">
-    <label>最大占用</label>
-    <input type="number" id="maxMB" min="0" step="128"> <span class="hint">MB（0 = 不限）</span>
-  </div>
-  <div class="row">
-    <label>保留天数</label>
-    <input type="number" id="keepDays" min="0" step="1"> <span class="hint">天（0 = 不限）</span>
-  </div>
-  <div class="row" style="margin-top:4px">
+  <div class="hint" style="margin-bottom:2px">0 = 不限。每次生成后自动按规则清理，从最旧的开始删。</div>
+  <div class="btns">
     <button class="primary" onclick="saveCache()">保存缓存设置</button>
     <button onclick="cleanup()">立即清理</button>
     <button class="danger" onclick="clearAll()">清空全部</button>
   </div>
-  <div class="hint">每次生成后自动按上面的规则清理，从最旧的开始删。</div>
 </div>
 
 <div class="card">
-  <h2>已缓存图片 <span class="stat" id="stat"></span></h2>
-  <div style="display:flex;justify-content:flex-end;margin:-6px 0 8px">
+  <div class="card-h2">
+    <h2>已缓存图片 <span class="stat" id="stat"></span></h2>
     <button class="pill" onclick="refreshImages()" title="重新读取缓存目录">↻ 刷新图片</button>
   </div>
   <div class="grid" id="grid"></div>
