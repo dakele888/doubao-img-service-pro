@@ -979,10 +979,33 @@ fn normalize_picture_tokens(prompt: &str) -> String {
 
 /// 把画面参数转成一句自然语言垫在提示词前面。
 /// 豆包网页版没有可靠的比例/时长控件，用文字约束最稳。
+/// 把客户端传来的模型名映射成豆包的规范模型名；认不出返回 None。
+/// 认不出的名字绝不原样塞给豆包（它看不懂 custom-video 这种内部 id，只会干扰理解）。
+fn normalize_model_name(raw: &str) -> Option<&'static str> {
+    let w = raw.trim().to_lowercase();
+    if w.is_empty() {
+        return None;
+    }
+    if w.contains("fast") {
+        return Some("Seedance 2.0 Fast");
+    }
+    if w.contains("2.5") {
+        return Some("Seedance 2.5");
+    }
+    if w.contains("mini") {
+        return Some("Seedance 2.0 Mini");
+    }
+    if w.contains("seedance") || w.contains("2.0") || w.contains("sd2") {
+        return Some("Seedance 2.0");
+    }
+    None
+}
+
 fn prompt_with_params(prompt: &str, aspect: &str, dur: &str, res: &str, model: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
-    if !model.is_empty() && model != "doubao-video" {
-        lines.push(format!("- 模型：{}", model));
+    // 只有映射成功才写模型行；认不出就不写（脚本会按默认 Mini 处理）
+    if let Some(m) = normalize_model_name(model) {
+        lines.push(format!("- 模型：{}", m));
     }
     if !aspect.is_empty() {
         lines.push(format!("- 画面比例：{}", aspect));
@@ -2529,7 +2552,7 @@ mod video_prompt_tests {
         assert!(r.ends_with("跑步"), "{}", r);
         assert_eq!(prompt_with_params("跑步", "", "", "", ""), "跑步");
         let r2 = prompt_with_params("跑步", "", "", "", "seedance-2.0-fast");
-        assert!(r2.contains("- 模型：seedance-2.0-fast"), "{}", r2);
+        assert!(r2.contains("- 模型：Seedance 2.0 Fast"), "{}", r2);
     }
 }
 
@@ -2612,5 +2635,30 @@ mod real_request_tests {
         let (prompt, _, refs) = parse_multipart_req(&b, "multipart/form-data; boundary=BND").expect("解析失败");
         assert!(prompt.contains("苏梨"), "prompt={}", prompt);
         assert_eq!(refs.len(), 2, "应有 2 张参考图，实际 {}", refs.len());
+    }
+}
+
+#[cfg(test)]
+mod model_name_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_known_names() {
+        assert_eq!(normalize_model_name("seedance-2.0-fast"), Some("Seedance 2.0 Fast"));
+        assert_eq!(normalize_model_name("sd2.0-fast"), Some("Seedance 2.0 Fast"));
+        assert_eq!(normalize_model_name("seedance-2.5"), Some("Seedance 2.5"));
+        assert_eq!(normalize_model_name("seedance-2.0-mini"), Some("Seedance 2.0 Mini"));
+        assert_eq!(normalize_model_name("seedance-2.0"), Some("Seedance 2.0"));
+    }
+
+    #[test]
+    fn unknown_names_are_dropped() {
+        assert_eq!(normalize_model_name("custom-video"), None);
+        assert_eq!(normalize_model_name("doubao-video"), None);
+        assert_eq!(normalize_model_name(""), None);
+        // 认不出的名字不能出现在提示词里
+        let r = prompt_with_params("跑步", "", "", "", "custom-video");
+        assert!(!r.contains("custom-video"), "提示词里不该带原始模型名：{}", r);
+        assert_eq!(r, "跑步");
     }
 }
