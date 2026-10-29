@@ -283,12 +283,86 @@ async function main() {
     await page.press("css:.tiptap", "Enter");
 
     let hit = null;
+    let freshUrls = [];
     const deadline = Date.now() + @@DEADLINE@@;
     while (Date.now() < deadline) {
       await page.waitForTimeout(2500);
       const fresh = (await collect()).filter((s) => !before[s]);
-      if (fresh.length) { hit = fresh[fresh.length - 1]; break; }
+      if (fresh.length) { hit = fresh[fresh.length - 1]; freshUrls = fresh; break; }
     }
+
+    // 列表里给的是 384x216 缩略图（CDN 模板 cthumb），签名绑定整条 URL，改参数只会 403。
+    // 原图（image_raw 模板）的签名地址藏在 React 组件数据里：顺着 img 的 fiber 往上找。
+    // 刚生成的图数据常常还没带 raw，等不到就刷新一次页面再找。
+    async function findRaw(key) {
+      return await page.evaluate((k) => {
+        const res = { targets: 0, found: null, err: null };
+        try {
+          // 防止 fiber 对象图太大拖垮执行：限制访问节点数
+          let budget = 200000;
+          function walk(obj, key, out, depth, seen) {
+            if (budget <= 0) return;
+            budget--;
+            if (!obj || typeof obj !== "object" || depth > 12 || out.length >= 4) return;
+            seen.add(obj);
+            for (const kk in obj) {
+              if (budget <= 0) return;
+              try {
+                const v = obj[kk];
+                if (typeof v === "string") {
+                  if (v.length < 3000 && v.indexOf("image_raw") >= 0 && v.indexOf("http") === 0 && v.indexOf(key) >= 0) out.push(v);
+                } else if (v && typeof v === "object") {
+                  walk(v, key, out, depth + 1, seen);
+                }
+              } catch (e) {}
+            }
+          }
+          const targets = [...document.querySelectorAll("img")].filter((i) => {
+            const s = i.currentSrc || i.src || "";
+            return s.indexOf(k) >= 0;
+          });
+          res.targets = targets.length;
+          for (let ti = targets.length - 1; ti >= 0; ti--) {
+            const target = targets[ti];
+            if (res.found || budget <= 0) break;
+            const fk = Object.keys(target).find((x) => x.indexOf("__reactFiber$") === 0);
+            if (!fk) continue;
+            let f = target[fk];
+            let depth = 0;
+            while (f && depth < 60 && !res.found && budget > 0) {
+              const hits = [];
+              walk(f.memoizedProps, k, hits, 0, new Set());
+              if (hits.length) res.found = hits[0];
+              f = f.return;
+              depth++;
+            }
+          }
+        } catch (e) {
+          res.err = String((e && e.message) || e);
+        }
+        return res;
+      }, key);
+    }
+    let upgraded = null;
+    let rawDbg = null;
+    if (hit) {
+      const key = (hit.split("?")[0].split("/").pop() || "").split("~")[0];
+      if (key) {
+        let r = await findRaw(key);
+        rawDbg = r;
+        upgraded = r && r.found;
+        for (let i = 0; i < 2 && !upgraded; i++) {
+          try {
+            await page.reload();
+            await page.waitForTimeout(4200);
+          } catch (e) {}
+          r = await findRaw(key);
+          rawDbg = r;
+          upgraded = r && r.found;
+        }
+      }
+    }
+    const finalUrl = upgraded || hit;
 
     const convUrl = await page.url();
     if (needRename && hit) {
@@ -306,7 +380,7 @@ async function main() {
     }
 
     if (!hit) emit({ ok: false, error: "等待超时，没抓到新生成的图片" });
-    else emit({ ok: true, url: hit, pageLabel: page.label, convUrl: convUrl, renamed: renamed, convHit: !!convHit, refs: REFS.length });
+    else emit({ ok: true, url: finalUrl, thumbUrl: hit, upgraded: !!upgraded, rawDbg: rawDbg, urls: freshUrls, pageLabel: page.label, convUrl: convUrl, renamed: renamed, convHit: !!convHit, refs: REFS.length });
   } catch (e) {
     emit({ ok: false, error: "脚本异常：" + String((e && e.message) || e) });
   }

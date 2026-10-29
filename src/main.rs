@@ -859,6 +859,24 @@ fn produce_image(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failu
     if url.is_empty() {
         return Err(Failure { message: "没有拿到图片地址".into(), code: "GEN_FAILED".into() });
     }
+    // 诊断：把页面上抓到的生成图 URL 都记下来，方便排查拿到的是不是缩略图
+    if let Some(d) = v.get("rawDbg") {
+        util::log(&format!(
+            "[原图] targets={} rawCount={} upgraded={} err={}",
+            d.get("targets").and_then(|x| x.as_i64()).unwrap_or(-1),
+            d.get("rawCount").and_then(|x| x.as_i64()).unwrap_or(-1),
+            v.get("upgraded").and_then(|x| x.as_bool()).unwrap_or(false),
+            d.get("err").and_then(|x| x.as_str()).unwrap_or("-")
+        ));
+    }
+    if let Some(urls) = v.get("urls").and_then(|x| x.as_array()) {
+        for u in urls {
+            if let Some(s) = u.as_str() {
+                let short: String = s.chars().take(220).collect();
+                util::log(&format!("[抓图] {}", short));
+            }
+        }
+    }
 
     // 回写页面/对话信息，方便下次直接命中
     let mut cur = Config::load(&config_file());
