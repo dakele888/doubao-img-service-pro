@@ -20,7 +20,7 @@ pub fn build_script(
     conv_name: &str,
     gen_timeout_ms: u64,
     refs: &[RefImage],
-    want_raw: bool,
+    want_tier: &str,
 ) -> String {
     let prompt_json = serde_json::to_string(prompt).unwrap_or_else(|_| "\"\"".into());
     let page_json = serde_json::to_string(page_label).unwrap_or_else(|_| "\"p2\"".into());
@@ -36,7 +36,7 @@ pub fn build_script(
     .unwrap_or_else(|_| "[]".into());
 
     TPL.replace("@@SPACE@@", SPACE)
-        .replace("@@RAW@@", if want_raw { "1" } else { "0" })
+        .replace("@@TIER@@", want_tier)
         .replace("@@MARK@@", MARK)
         .replace("@@PROMPT@@", &prompt_json)
         .replace("@@PAGE@@", &page_json)
@@ -47,7 +47,8 @@ pub fn build_script(
 
 const TPL: &str = r##"
 const task = await taskSpace("@@SPACE@@");
-const WANT_RAW = "@@RAW@@" === "1";
+// 接口返回的图片档位："ori"=网页「下载原图」同档（带水印）、"raw"=无水印原图、"thumb"=列表缩略图
+const WANT_TIER = "@@TIER@@";
 const PROMPT = @@PROMPT@@;
 const PAGE_LABEL = @@PAGE@@;
 const CONV_NAME = @@NAME@@;
@@ -137,18 +138,18 @@ async function main() {
     await page.evaluate(() => {
       if (window.__mohaRawHook) return;
       window.__mohaRawHook = 1;
-      const T = (window.__mohaTiers = window.__mohaTiers || { raw: {}, ori: {} });
-      function grab(item) {
+      const T = (window.__mohaTiers = window.__mohaTiers || { raw: {}, ori: {}, thumb: {} });
+      // 按 URL 里的 CDN 模板分档：image_raw=无水印原图、cthumb=缩略图、cgen=网页「下载原图」同档
+      function putUrl(u) {
         try {
-          const r = item.image_ori_raw || (item.image && item.image.image_ori_raw);
-          const o = item.image_ori || (item.image && item.image.image_ori);
-          const put = (u, tier) => {
-            if (!u) return;
-            const m = String(u).match(/rc_gen_image\/([^?\/~]+)/);
-            if (m) T[tier][m[1]] = String(u);
-          };
-          put(r && r.url, "raw");
-          put(o && o.url, "ori");
+          const s = String(u || "");
+          const m = s.match(/rc_gen_image\/([^?\/~]+)/);
+          if (!m) return;
+          let tier = null;
+          if (s.indexOf("image_raw") >= 0) tier = "raw";
+          else if (s.indexOf("cthumb") >= 0) tier = "thumb";
+          else if (s.indexOf("cgen") >= 0) tier = "ori";
+          if (tier) T[tier][m[1]] = s;
         } catch (e) {}
       }
       function scan(obj) {
@@ -157,10 +158,8 @@ async function main() {
           if (Array.isArray(obj)) { obj.forEach(scan); return; }
           for (const k in obj) {
             const v = obj[k];
-            if (v && typeof v === "object") {
-              grab(v);
-              scan(v);
-            }
+            if (typeof v === "string") putUrl(v);
+            else if (v && typeof v === "object") scan(v);
           }
         } catch (e) {}
       }
@@ -362,10 +361,10 @@ async function main() {
     // 原图（image_raw 模板）的签名地址藏在 React 组件数据里：顺着 img 的 fiber 往上找。
     // 刚生成的图数据常常还没带 raw，等不到就刷新一次页面再找。
     // 按档位找同一张图的签名地址：先查嗅探缓存，再顺着 img 的 fiber 往上找。
-    // tier="raw" → image_raw 模板（无水印原图）；tier="ori" → cgen 模板（网页「下载原图」同档，带水印）。
-    // 都没有就刷新一次页面再找。
+    // tier="raw"→image_raw 模板（无水印原图）；"thumb"→cthumb 模板（缩略图）；
+    // "ori"→cgen 模板（网页「下载原图」同档，带水印）。
     async function findTier(key, tier) {
-      const tpl = tier === "raw" ? "image_raw" : "cgen";
+      const tpl = tier === "raw" ? "image_raw" : (tier === "thumb" ? "cthumb" : "cgen");
       return await page.evaluate((arg) => {
         const res = { targets: 0, found: null, err: null, cached: false };
         try {
@@ -416,31 +415,42 @@ async function main() {
         return res;
       }, { key: key, tier: tier, tpl: tpl });
     }
-    // 档位选择：默认 ori（同网页「下载原图」：全分辨率，带豆包AI生成水印）；
-    // 勾了「无水印原图」才用 raw。要的档找不到就退另一档（总比 384x216 缩略图强），最后退缩略图。
+    // 档位选择：thumb = 强制换成 cthumb 缩略图（列表地址有时被页面渲染成 cgen 大图）；
+    // ori = 默认（同网页「下载原图」：全分辨率，带豆包AI生成水印）；raw = 无水印原图。
+    // 要的档找不到就退另一档（总比缩略图强），全失败才用列表原始地址。
     let upgraded = null;
     let tier = null;
     let rawDbg = null;
     if (hit) {
       const key = (hit.split("?")[0].split("/").pop() || "").split("~")[0];
       if (key) {
-        const want = WANT_RAW ? "raw" : "ori";
-        const alt = WANT_RAW ? "ori" : "raw";
-        let r = await findTier(key, want);
-        rawDbg = r;
-        if (r && r.found) { upgraded = r.found; tier = want; }
-        for (let i = 0; i < 2 && !upgraded; i++) {
-          try {
-            await page.reload();
-            await page.waitForTimeout(4200);
-          } catch (e) {}
-          r = await findTier(key, want);
+        if (WANT_TIER === "thumb") {
+          if (hit.indexOf("cthumb") >= 0) {
+            tier = "thumb";
+          } else {
+            const r = await findTier(key, "thumb");
+            rawDbg = r;
+            if (r && r.found) { upgraded = r.found; tier = "thumb"; }
+          }
+        } else {
+          const want = WANT_TIER === "raw" ? "raw" : "ori";
+          const alt = WANT_TIER === "raw" ? "ori" : "raw";
+          let r = await findTier(key, want);
           rawDbg = r;
           if (r && r.found) { upgraded = r.found; tier = want; }
-        }
-        if (!upgraded) {
-          r = await findTier(key, alt);
-          if (r && r.found) { upgraded = r.found; tier = alt; }
+          for (let i = 0; i < 2 && !upgraded; i++) {
+            try {
+              await page.reload();
+              await page.waitForTimeout(4200);
+            } catch (e) {}
+            r = await findTier(key, want);
+            rawDbg = r;
+            if (r && r.found) { upgraded = r.found; tier = want; }
+          }
+          if (!upgraded) {
+            r = await findTier(key, alt);
+            if (r && r.found) { upgraded = r.found; tier = alt; }
+          }
         }
       }
     }

@@ -489,8 +489,20 @@ fn route(stream: &mut TcpStream, req: Req) {
         if let Some(x) = v.get("requirePassword").and_then(|x| x.as_bool()) {
             cfg.require_password = x;
         }
-        if let Some(x) = v.get("rawImage").and_then(|x| x.as_bool()) {
-            cfg.raw_image = x;
+        if let Some(x) = v.get("imageTier").and_then(|x| x.as_str()) {
+            let t = x.trim();
+            if ["ori", "raw", "thumb"].contains(&t) {
+                cfg.image_tier = t.to_string();
+            } else {
+                return json_resp(
+                    stream,
+                    400,
+                    &json!({ "ok": false, "error": "imageTier 只能是 ori / raw / thumb".to_string() }),
+                );
+            }
+        } else if let Some(x) = v.get("rawImage").and_then(|x| x.as_bool()) {
+            // 兼容旧面板/脚本
+            cfg.image_tier = if x { "raw".into() } else { "ori".into() };
         }
         cfg.save(&config_file());
         let od = out_dir(&cfg);
@@ -824,7 +836,7 @@ fn produce_image(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failu
 
     let mut last: Option<Value> = None;
     for attempt in 1..=3 {
-        let script = ego::build_script(prompt, &cfg.page_label, &cfg.conversation_name, GEN_TIMEOUT_MS, refs, cfg.raw_image);
+        let script = ego::build_script(prompt, &cfg.page_label, &cfg.conversation_name, GEN_TIMEOUT_MS, refs, &cfg.image_tier);
         let r = ego::run(&bin, &script, Duration::from_millis(GEN_TIMEOUT_MS));
         match r {
             Ok(v) => {

@@ -13,7 +13,8 @@ h1{font-size:15px;margin:0 0 2px}
 .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:7px}
 .row>label{width:78px;color:#4c5a53;font-size:12.5px;flex:0 0 auto}
 .row>label.chk{width:auto;flex:1 1 auto;min-width:0}
-input[type=text],input[type=number]{border:1px solid #d3ddd7;border-radius:6px;padding:5px 8px;font-size:12.5px;font-family:inherit;background:#fbfcfb}
+input[type=text],input[type=number],select{border:1px solid #d3ddd7;border-radius:6px;padding:5px 8px;font-size:12.5px;font-family:inherit;background:#fbfcfb;color:#2c3a32}
+select{cursor:pointer}
 input[type=text]{flex:1;min-width:180px}
 input[type=number]{width:84px}
 .hint{color:#8a978f;font-size:12px}
@@ -98,7 +99,11 @@ button.danger:hover{background:#fdf1f0}
   </div>
   <div class="row" style="margin-bottom:4px">
     <label>接口图片</label>
-    <label class="chk"><input type="checkbox" id="rawImage" onchange="saveRaw()"> 无水印原图（可选）</label>
+    <select id="imgTier" onchange="saveTier()">
+      <option value="ori">原图 · 带水印（同网页下载原图）</option>
+      <option value="raw">原图 · 无水印</option>
+      <option value="thumb">缩略图 · 最快（384x216）</option>
+    </select>
   </div>
   <div class="hint" id="rawHint" style="margin-bottom:2px"></div>
   <div class="sep"></div>
@@ -384,8 +389,8 @@ function load(){
     $('maxMB').value=d.cfg.maxMB;
     $('keepDays').value=d.cfg.keepDays;
     $('directMode').checked=!!d.cfg.directMode;
-    $('rawImage').checked=d.cfg.rawImage===true;
-    applyRawHint();
+    $('imgTier').value=(d.cfg.imageTier==='raw'||d.cfg.imageTier==='thumb')?d.cfg.imageTier:'ori';
+    applyTierHint();
     applyDirectUI();
     $('baseUrl').value=BASE+'/v1';
     renderPwd(d.cfg.requirePassword!==false);
@@ -449,19 +454,23 @@ function onDirect(){
     .then(function(){toast(on?'直传已开启':'直传已关闭');load()});
 }
 function saveCache(){
-  var b={outDir:$('outDir').value.trim(),maxFiles:+$('maxFiles').value||0,maxMB:+$('maxMB').value||0,keepDays:+$('keepDays').value||0,rawImage:$('rawImage').checked};
+  var b={outDir:$('outDir').value.trim(),maxFiles:+$('maxFiles').value||0,maxMB:+$('maxMB').value||0,keepDays:+$('keepDays').value||0,imageTier:$('imgTier').value};
   api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)})
     .then(function(d){toast(d.ok?'已保存':'保存失败：'+d.error);load()});
 }
 // 接口图片档位即时生效：改一下就存，不用点保存
-function saveRaw(){
-  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({rawImage:$('rawImage').checked})})
-    .then(function(d){toast(d.ok?(($('rawImage').checked?'已切换：接口返回无水印原图':'已切换：接口返回原图（带水印）')+'，下次生成生效'):'保存失败：'+d.error)});
+function saveTier(){
+  var v=$('imgTier').value;
+  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({imageTier:v})})
+    .then(function(d){toast(d.ok?('已切换：接口返回'+({ori:'原图（带水印）',raw:'无水印原图',thumb:'缩略图'})[v]+'，下次生成生效'):'保存失败：'+d.error)});
 }
-function applyRawHint(){
-  $('rawHint').textContent = $('rawImage').checked
-    ? '已开：接口返回无水印原图（同分辨率去掉「豆包AI生成」水印），偶尔要多花几秒。'
-    : '默认：接口返回网页「下载原图」同档原图（2848x1600 全分辨率，右下角带「豆包AI生成」水印）。勾选则返回无水印版。';
+function applyTierHint(){
+  var m={
+    ori:'默认：接口返回网页「下载原图」同档原图（2848x1600 全分辨率，右下角带「豆包AI生成」水印）。',
+    raw:'接口返回无水印原图（同分辨率去掉「豆包AI生成」水印），偶尔要多花几秒。',
+    thumb:'接口返回列表缩略图（384x216，最快最小），适合当预览图。'
+  };
+  $('rawHint').textContent = m[$('imgTier').value] || m.ori;
 }
 function cleanup(){api('/api/cleanup',{method:'POST'}).then(function(d){toast('清理了 '+d.removed.length+' 张');load()})}
 function clearAll(){if(!confirm('清空缓存目录里的所有图片？'))return;api('/api/clear',{method:'POST'}).then(function(d){toast('已清空 '+d.removed+' 张');load()})}
