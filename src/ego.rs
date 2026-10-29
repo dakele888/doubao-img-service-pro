@@ -762,7 +762,7 @@ async function dismissSafetyDialog() {
 // 豆包可选：Seedance 2.5（5 倍消耗）/ Seedance 2.0（2 倍）/ Seedance 2.0 Fast / Seedance 2.0 Mini
 // 默认 Mini：没传 model、或者模型名认不出，都回落到 Mini（日常生成、消耗最低）。
 async function pickModel() {
-  const mm = PROMPT.match(/模型\s*([A-Za-z0-9._\- ]{2,40})/);
+  const mm = PROMPT.match(/模型[：:\s]*([A-Za-z0-9._\- ]{2,40})/);
   const want = mm ? mm[1].trim().toLowerCase() : "";
   let target = "Seedance 2.0 Mini";
   if (want.indexOf("fast") >= 0) target = "Seedance 2.0 Fast";
