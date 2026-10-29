@@ -338,9 +338,10 @@ async function main() {
       }
       await page.waitForTimeout(1800);
     }
-    // 缩略图是 img + blob:，等它渲染出来；最多等 18 秒
+    // 缩略图是 img + blob:，等它渲染出来；张数越多给的时间越长（每张 8 轮 × 600ms，最少 18 秒）
     let after = before;
-    for (let k = 0; k < 30; k++) {
+    const rounds = Math.max(30, REFS.length * 8);
+    for (let k = 0; k < rounds; k++) {
       after = await attachCount();
       if (after >= before + REFS.length) return { ok: true, n: REFS.length };
       await page.waitForTimeout(600);
@@ -673,7 +674,8 @@ async function attachRefs() {
     await page.waitForTimeout(1800);
   }
   let after = before;
-  for (let k = 0; k < 30; k++) {
+  const rounds = Math.max(30, REFS.length * 8);
+  for (let k = 0; k < rounds; k++) {
     after = await attachCount();
     if (after >= before + REFS.length) return { ok: true, n: REFS.length };
     await page.waitForTimeout(600);

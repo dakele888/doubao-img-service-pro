@@ -1182,7 +1182,7 @@ fn b64(data: &[u8]) -> String {
 }
 
 // ---------- 参考图 ----------
-const MAX_REFS: usize = 6;
+const MAX_REFS: usize = 9;
 const MAX_REF_BYTES: usize = 10 * 1024 * 1024;
 
 fn b64_val(c: u8) -> Option<u8> {

@@ -200,7 +200,7 @@ button.danger:hover{background:#fdf1f0}
       <input type="text" id="vidConv" placeholder="视频专用">
       <button class="primary" onclick="saveVidConv()">保存</button>
     </div>
-    <div class="hint" style="margin-bottom:8px">视频生成很慢（通常 1~5 分钟），同一时间只跑一个请求，请耐心等。</div>
+    <div class="hint" style="margin-bottom:8px">视频生成很慢（通常 1~5 分钟），同一时间只跑一个请求，请耐心等。<b>支持多张参考图</b>（最多 9 张，用 <code>"images":[...]</code> 传）。</div>
     <div class="hint">用法：POST <code>/v1/videos/generations</code>，跟生图接口一样的 body：<br>
       <code>{"prompt":"一只猫在草地上奔跑"}</code><br>
       返回：<code>{"data":[{"url":"http://127.0.0.1:8788/files/xxxx.mp4"}]}</code></div>
@@ -251,7 +251,7 @@ button.danger:hover{background:#fdf1f0}
     <table>
       <tr><td>图片地址</td><td><code>{"prompt":"改成水彩风","image":"https://x.com/a.png"}</code></td></tr>
       <tr><td>base64</td><td><code>"image":"data:image/png;base64,iVBOR..."</code>，也可以不带 <code>data:</code> 前缀</td></tr>
-      <tr><td>多张参考</td><td><code>"images":["...","..."]</code>，最多 3 张</td></tr>
+      <tr><td>多张参考</td><td><code>"images":["...","..."]</code>，最多 9 张（视频中转同样支持）</td></tr>
       <tr><td>别名</td><td><code>image_url</code> / <code>init_image</code> / <code>reference_image</code> / <code>source_image</code> 都认</td></tr>
       <tr><td>限制</td><td>单张 ≤ 8MB，只支持 PNG / JPEG / WEBP / GIF</td></tr>
     </table>
