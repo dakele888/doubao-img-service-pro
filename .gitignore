@@ -20,3 +20,5 @@
 .vscode/
 .idea/
 *.swp
+vt/
+proxy/
