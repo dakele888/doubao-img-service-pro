@@ -734,42 +734,18 @@ fn route(stream: &mut TcpStream, req: Req) {
     }
 
     // 客户端（如魔哈）在正式生成前会先探测接口是否可用。
-    // 不同客户端读的字段不一样，这里把常见的全给上，包括各种数组字段，避免它读某个列表时炸掉。
+    // 关键：其他中转服务都返回 401 + 标准错误体，客户端对这条分支处理得很稳；
+    // 反而返回 200 会让它走进"解析成功响应"的代码，那里遇到不认识的字段就崩。
+    // 所以这里故意保持和真实服务一致的非 2xx 响应。
     if p == "/v1/videos/connection-test" || p == "/v1/videos/health" {
         return json_resp(
             stream,
-            200,
+            401,
             &json!({
-                "ok": true,
-                "success": true,
-                "status": "ok",
-                "state": "ok",
-                "code": 0,
-                "object": "video",
-                "id": "connection-test",
-                "message": "ok",
-                "available": true,
-                "connected": true,
-                "videos": [],
-                "items": [],
-                "list": [],
-                "models": [],
-                "tasks": [],
-                "data": {
-                    "ok": true,
-                    "success": true,
-                    "status": "ok",
-                    "state": "ok",
-                    "code": 0,
-                    "available": true,
-                    "connected": true,
-                    "id": "connection-test",
-                    "videos": [],
-                    "items": [],
-                    "list": [],
-                    "models": [],
-                    "tasks": [],
-                    "data": []
+                "error": {
+                    "code": "",
+                    "message": "无效的令牌",
+                    "type": "new_api_error"
                 }
             }),
         );
