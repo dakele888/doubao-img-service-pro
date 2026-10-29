@@ -393,18 +393,32 @@ fn route(stream: &mut TcpStream, req: Req) {
         return resp(stream, 204, "text/plain", b"");
     }
 
-    // 视频接口的所有请求都先记一条：客户端到底发了没有、发了什么，日志里要看得见
-    if p.starts_with("/v1/videos") {
+    // 视频接口及模型列表的所有请求都先记一条：客户端到底发了没有、发了什么，日志里要看得见
+    if p.starts_with("/v1/") && !p.starts_with("/v1/images") {
         let head = String::from_utf8_lossy(&req.body[..req.body.len().min(240)])
             .replace(['\r', '\n'], " ");
         util::log(&format!(
-            "[视频] 请求 {} {} · {}B · ct={} · body={}",
+            "[接口] 请求 {} {} · {}B · ct={} · body={}",
             m,
             p,
             req.body.len(),
             if req.ctype.is_empty() { "(无)" } else { req.ctype.as_str() },
             head
         ));
+    }
+
+    // OpenAI 模型列表：多数客户端连接时会先拉一次
+    if m == "GET" && p == "/v1/models" {
+        let now = (util::now_ms() / 1000) as i64;
+        let model = |id: &str| json!({ "id": id, "object": "model", "created": now, "owned_by": "doubao" });
+        return json_resp(
+            stream,
+            200,
+            &json!({
+                "object": "list",
+                "data": [model("doubao-image"), model("doubao-video")],
+            }),
+        );
     }
 
     if m == "GET" && (p == "/" || p == "/panel") {
@@ -720,7 +734,7 @@ fn route(stream: &mut TcpStream, req: Req) {
     }
 
     // 客户端（如魔哈）在正式生成前会先探测接口是否可用。
-    // 返回 200 + 明确的成功标记，字段多塞几个，不同客户端认哪个都能过。
+    // 不同客户端读的字段不一样，这里把常见的全给上，包括各种数组字段，避免它读某个列表时炸掉。
     if p == "/v1/videos/connection-test" || p == "/v1/videos/health" {
         return json_resp(
             stream,
@@ -729,14 +743,33 @@ fn route(stream: &mut TcpStream, req: Req) {
                 "ok": true,
                 "success": true,
                 "status": "ok",
+                "state": "ok",
+                "code": 0,
                 "object": "video",
                 "id": "connection-test",
                 "message": "ok",
+                "available": true,
+                "connected": true,
+                "videos": [],
+                "items": [],
+                "list": [],
+                "models": [],
+                "tasks": [],
                 "data": {
                     "ok": true,
                     "success": true,
                     "status": "ok",
-                    "id": "connection-test"
+                    "state": "ok",
+                    "code": 0,
+                    "available": true,
+                    "connected": true,
+                    "id": "connection-test",
+                    "videos": [],
+                    "items": [],
+                    "list": [],
+                    "models": [],
+                    "tasks": [],
+                    "data": []
                 }
             }),
         );
