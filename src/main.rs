@@ -733,18 +733,16 @@ fn route(stream: &mut TcpStream, req: Req) {
         );
     }
 
-    // 客户端（如魔哈）在正式生成前会先探测接口是否可用。
-    // 关键：其他中转服务都返回 401 + 标准错误体，客户端对这条分支处理得很稳；
-    // 反而返回 200 会让它走进"解析成功响应"的代码，那里遇到不认识的字段就崩。
-    // 所以这里故意保持和真实服务一致的非 2xx 响应。
+    // 「连接测试」按钮专用：客户端 ping 模式下 404 即算通过（只有 401/403/≥500 才算失败）。
+    // OpenAI 标准里本来就没有这个端点，返回 404 与真实中转服务一致。
     if p == "/v1/videos/connection-test" || p == "/v1/videos/health" {
         return json_resp(
             stream,
-            401,
+            404,
             &json!({
                 "error": {
                     "code": "",
-                    "message": "无效的令牌",
+                    "message": "not found",
                     "type": "new_api_error"
                 }
             }),
