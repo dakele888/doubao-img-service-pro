@@ -1094,24 +1094,32 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
     } else {
         json!({})
     };
-    let aspect = body_json
-        .get("aspect_ratio")
-        .and_then(|x| x.as_str())
-        .or_else(|| body_json.get("size").and_then(|x| x.as_str()))
-        .unwrap_or("")
-        .to_string();
-    let resolution = body_json.get("resolution").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let seconds = match body_json.get("duration").or_else(|| body_json.get("seconds")) {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        _ => "8".to_string(),
+    // multipart 请求的参数在表单字段里，JSON 解析不到 —— 不解析就会全部落到默认值
+    let mp_fields = if low.contains("multipart/form-data") {
+        parse_multipart_fields(&req.body, &req.ctype)
+    } else {
+        Vec::new()
+    };
+    let field = |k: &str| -> String {
+        if let Some(x) = body_json.get(k).and_then(|x| x.as_str()) {
+            return x.to_string();
+        }
+        mp_fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default()
+    };
+    let aspect = {
+        let a = field("aspect_ratio");
+        if a.is_empty() { field("size") } else { a }
+    };
+    let resolution = field("resolution");
+    let seconds = {
+        let d = field("duration");
+        if d.is_empty() { let s = field("seconds"); if s.is_empty() { "8".to_string() } else { s } } else { d }
     };
     let size = if aspect.is_empty() { "1280x720".to_string() } else { aspect.clone() };
-    let model = body_json
-        .get("model")
-        .and_then(|x| x.as_str())
-        .unwrap_or("doubao-video")
-        .to_string();
+    let model = {
+        let m = field("model");
+        if m.is_empty() { "doubao-video".to_string() } else { m }
+    };
     // 画面参数垫在提示词前面（豆包网页没有可靠的比例/时长控件）
     let full_prompt = prompt_with_params(&prompt, &aspect, &seconds, &resolution, &model);
     let seq = VIDEO_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -1298,23 +1306,28 @@ fn generate_video(stream: &mut TcpStream, req: &Req) {
     } else {
         json!({})
     };
-    let aspect = body_json
-        .get("aspect_ratio")
-        .and_then(|x| x.as_str())
-        .or_else(|| body_json.get("size").and_then(|x| x.as_str()))
-        .unwrap_or("")
-        .to_string();
-    let resolution = body_json.get("resolution").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let seconds = match body_json.get("duration").or_else(|| body_json.get("seconds")) {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        _ => "".to_string(),
+    // multipart 请求的参数在表单字段里，JSON 解析不到 —— 不解析就会全部落到默认值
+    let mp_fields = if low.contains("multipart/form-data") {
+        parse_multipart_fields(&req.body, &req.ctype)
+    } else {
+        Vec::new()
     };
-    let model = body_json
-        .get("model")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .to_string();
+    let field = |k: &str| -> String {
+        if let Some(x) = body_json.get(k).and_then(|x| x.as_str()) {
+            return x.to_string();
+        }
+        mp_fields.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default()
+    };
+    let aspect = {
+        let a = field("aspect_ratio");
+        if a.is_empty() { field("size") } else { a }
+    };
+    let resolution = field("resolution");
+    let seconds = {
+        let d = field("duration");
+        if d.is_empty() { field("seconds") } else { d }
+    };
+    let model = field("model");
     let full_prompt = prompt_with_params(&prompt, &aspect, &seconds, &resolution, &model);
 
     util::log(&format!(
@@ -1972,6 +1985,49 @@ fn find_sub(h: &[u8], n: &[u8], from: usize) -> Option<usize> {
     None
 }
 
+/// 从 multipart 表单里提取普通文本字段（aspect_ratio / duration / model / resolution 等）。
+/// 带参考图的请求客户端都用 multipart，参数就在这些字段里，不解析就只能用默认值。
+fn parse_multipart_fields(body: &[u8], ctype: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let Some(bpos) = ctype.find("boundary=") else {
+        return out;
+    };
+    let boundary = ctype[bpos + 9..].trim().trim_matches('"').to_string();
+    if boundary.is_empty() {
+        return out;
+    }
+    let text = String::from_utf8_lossy(body);
+    for part in text.split(&format!("--{}", boundary)) {
+        if part.trim().is_empty() || part.trim_start().starts_with("--") {
+            continue;
+        }
+        let Some(ni) = part.find("name=\"") else {
+            continue;
+        };
+        let rest = &part[ni + 6..];
+        let Some(ne) = rest.find('"') else {
+            continue;
+        };
+        let name = rest[..ne].to_string();
+        // 有 filename 的是文件字段，跳过
+        if part.contains("filename=") || name.is_empty() {
+            continue;
+        }
+        let Some(split) = part.find("\r\n\r\n") else {
+            continue;
+        };
+        let mut val = part[split + 4..].to_string();
+        if let Some(p) = val.find(&format!("\r\n--{}", boundary)) {
+            val.truncate(p);
+        }
+        let val = val.trim().to_string();
+        if !val.is_empty() && val.len() < 4096 {
+            out.push((name, val));
+        }
+    }
+    out
+}
+
 fn parse_multipart_req(body: &[u8], ctype: &str) -> Result<(String, bool, Vec<ego::RefImage>), String> {
     let bnd = match boundary_of(ctype) {
         Some(b) => b,
@@ -2462,5 +2518,30 @@ mod video_prompt_tests {
         assert_eq!(prompt_with_params("跑步", "9:16", "8", "720p", ""), "（画面比例 9:16，分辨率 720p，时长 8 秒）跑步");
         assert_eq!(prompt_with_params("跑步", "", "", "", ""), "跑步");
         assert_eq!(prompt_with_params("跑步", "", "", "", "seedance-2.0-fast"), "（模型 seedance-2.0-fast）跑步");
+    }
+}
+
+#[cfg(test)]
+mod multipart_field_tests {
+    use super::*;
+
+    #[test]
+    fn extract_text_fields() {
+        let body = b"--BND\r\nContent-Disposition: form-data; name=\"aspect_ratio\"\r\n\r\n16:9\r\n--BND\r\nContent-Disposition: form-data; name=\"duration\"\r\n\r\n12\r\n--BND\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nseedance-2.0-fast\r\n--BND--\r\n";
+        let f = parse_multipart_fields(body, "multipart/form-data; boundary=BND");
+        assert_eq!(f.len(), 3, "got {:?}", f);
+        assert_eq!(f[0].0, "aspect_ratio");
+        assert_eq!(f[0].1, "16:9");
+        assert_eq!(f[1].1, "12");
+        assert_eq!(f[2].1, "seedance-2.0-fast");
+    }
+
+    #[test]
+    fn skip_file_fields() {
+        let body = b"--BND\r\nContent-Disposition: form-data; name=\"reference_images\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\nBINARYDATA\r\n--BND\r\nContent-Disposition: form-data; name=\"duration\"\r\n\r\n9\r\n--BND--\r\n";
+        let f = parse_multipart_fields(body, "multipart/form-data; boundary=BND");
+        assert_eq!(f.len(), 1, "got {:?}", f);
+        assert_eq!(f[0].0, "duration");
+        assert_eq!(f[0].1, "9");
     }
 }
