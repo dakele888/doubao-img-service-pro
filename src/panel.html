@@ -343,7 +343,7 @@ function waitRestart(target){
   var t0=Date.now();
   var iv=setInterval(function(){
     var timeout=Date.now()-t0>90000;
-    fetch('/api/version').then(function(r){return r.json()}).then(function(d){
+    fetch(BASE+'/api/version').then(function(r){return r.json()}).then(function(d){
       if(d.current===target||timeout){clearInterval(iv);afterRestart(d&&d.current===target);}
     }).catch(function(){
       if(timeout){clearInterval(iv);afterRestart(false);}
@@ -394,7 +394,7 @@ function updClose(){
   document.getElementById('updMask').classList.remove('on');
 }
 function pollUpd(){
-  fetch('/api/update/status').then(function(r){return r.json()}).then(function(d){
+  fetch(BASE+'/api/update/status').then(function(r){return r.json()}).then(function(d){
     updStage(d.stage,d.msg);
     // 旧进程退出前的最后阶段：转等新进程
     if(d.stage===5){
@@ -414,7 +414,7 @@ function doUpdate(){
   if(!confirm('更新到 v'+VER.latest+'？\n\n会下载新版本替换当前 exe 并自动重启服务，一般 10~60 秒。')) return;
   updShow('正在更新','正在启动…');
   b.disabled=true;
-  fetch('/api/update',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
+  fetch(BASE+'/api/update',{method:'POST'}).then(function(r){return r.json()}).then(function(d){
     if(!d.ok){
       updStage(9,(d.error&&d.error.message)||'启动失败');
       b.disabled=false;
