@@ -930,6 +930,72 @@ fn generate(stream: &mut TcpStream, req: &Req) {
     }
 }
 
+// ---------------- 视频提示词预处理 ----------------
+
+/// 客户端 prompt 里的图片引用标记（`<Picture 1>` / `@图 1` / `@图1`）换成「第 1 张参考图」。
+/// 豆包网页不认这些标记，原样发过去模型只会当普通文字，根本对不上是哪张图。
+fn normalize_picture_tokens(prompt: &str) -> String {
+    let cs: Vec<char> = prompt.chars().collect();
+    let mut out = String::with_capacity(prompt.len() + 16);
+    let mut i = 0;
+    while i < cs.len() {
+        // <Picture N>
+        if cs[i] == '<' {
+            let head: String = cs[i..(i + 16).min(cs.len())].iter().collect::<String>().to_lowercase();
+            if head.starts_with("<picture") {
+                if let Some(off) = cs[i..].iter().position(|c| *c == '>') {
+                    let inner: String = cs[i..i + off].iter().collect();
+                    let num: String = inner.chars().filter(|c| c.is_ascii_digit()).collect();
+                    if !num.is_empty() {
+                        out.push_str(&format!("第{}张参考图", num));
+                        i += off + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        // @图 N / @图N
+        if cs[i] == '@' && i + 1 < cs.len() && cs[i + 1] == '图' {
+            let mut j = i + 2;
+            while j < cs.len() && (cs[j] == ' ' || cs[j] == '\u{3000}') {
+                j += 1;
+            }
+            let start = j;
+            while j < cs.len() && cs[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > start {
+                let num: String = cs[start..j].iter().collect();
+                out.push_str(&format!("第{}张参考图", num));
+                i = j;
+                continue;
+            }
+        }
+        out.push(cs[i]);
+        i += 1;
+    }
+    out
+}
+
+/// 把画面参数转成一句自然语言垫在提示词前面。
+/// 豆包网页版没有可靠的比例/时长控件，用文字约束最稳。
+fn prompt_with_params(prompt: &str, aspect: &str, dur: &str, res: &str) -> String {
+    let mut tags: Vec<String> = Vec::new();
+    if !aspect.is_empty() {
+        tags.push(format!("画面比例 {}", aspect));
+    }
+    if !res.is_empty() {
+        tags.push(format!("分辨率 {}", res));
+    }
+    if !dur.is_empty() {
+        tags.push(format!("时长 {} 秒", dur));
+    }
+    if tags.is_empty() {
+        return prompt.to_string();
+    }
+    format!("（{}）{}", tags.join("，"), prompt)
+}
+
 // ---------------- OpenAI 通用视频接口（异步任务制） ----------------
 // POST   /v1/videos              创建任务 → 返回 job（status=queued）
 // GET    /v1/videos/{id}         查询任务状态
@@ -1009,7 +1075,8 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
             )
         }
     };
-    let prompt = prompt.trim().to_string();
+    // <Picture N> / @图 N → 第 N 张参考图，否则豆包对不上是哪张图
+    let prompt = normalize_picture_tokens(prompt.trim());
     if prompt.is_empty() {
         return json_resp(
             stream,
@@ -1018,22 +1085,32 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
         );
     }
 
-    // 可选参数原样回显（不真正控制豆包，只是为了符合 OpenAI 的响应结构）
-    let (size, seconds, model) = if is_json_body {
-        let v: Value = serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}));
-        let sec = match v.get("seconds") {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Number(n)) => n.to_string(),
-            _ => "8".to_string(),
-        };
-        (
-            v.get("size").and_then(|x| x.as_str()).unwrap_or("1280x720").to_string(),
-            sec,
-            v.get("model").and_then(|x| x.as_str()).unwrap_or("doubao-video").to_string(),
-        )
+    // 参数兼容两种写法：魔哈这类客户端发 aspect_ratio / duration / resolution，OpenAI 风格发 size / seconds
+    let body_json: Value = if is_json_body {
+        serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}))
     } else {
-        ("1280x720".to_string(), "8".to_string(), "doubao-video".to_string())
+        json!({})
     };
+    let aspect = body_json
+        .get("aspect_ratio")
+        .and_then(|x| x.as_str())
+        .or_else(|| body_json.get("size").and_then(|x| x.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let resolution = body_json.get("resolution").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let seconds = match body_json.get("duration").or_else(|| body_json.get("seconds")) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => "8".to_string(),
+    };
+    let size = if aspect.is_empty() { "1280x720".to_string() } else { aspect.clone() };
+    let model = body_json
+        .get("model")
+        .and_then(|x| x.as_str())
+        .unwrap_or("doubao-video")
+        .to_string();
+    // 画面参数垫在提示词前面（豆包网页没有可靠的比例/时长控件）
+    let full_prompt = prompt_with_params(&prompt, &aspect, &seconds, &resolution);
 
     let seq = VIDEO_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = format!("video_{}_{}", util::now_ms(), seq);
@@ -1076,7 +1153,7 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let started = util::now_ms();
-        match produce_video(&prompt, &refs) {
+        match produce_video(&full_prompt, &refs) {
             Ok(res) => {
                 let cost = ((util::now_ms().saturating_sub(started)) as f64) / 1000.0;
                 util::log(&format!("[视频] 任务 {} 完成（{:.1}s）{}", id2, cost, res.name));
@@ -1203,7 +1280,8 @@ fn generate_video(stream: &mut TcpStream, req: &Req) {
             )
         }
     };
-    let prompt = prompt.trim().to_string();
+    // <Picture N> / @图 N → 第 N 张参考图，否则豆包对不上是哪张图
+    let prompt = normalize_picture_tokens(prompt.trim());
     if prompt.is_empty() {
         return json_resp(
             stream,
@@ -1211,6 +1289,26 @@ fn generate_video(stream: &mut TcpStream, req: &Req) {
             &json!({ "error": { "message": "prompt 不能为空", "type": "invalid_request_error" } }),
         );
     }
+
+    // 画面参数转成自然语言垫在提示词前
+    let body_json: Value = if is_json_body {
+        serde_json::from_slice(&req.body).unwrap_or_else(|_| json!({}))
+    } else {
+        json!({})
+    };
+    let aspect = body_json
+        .get("aspect_ratio")
+        .and_then(|x| x.as_str())
+        .or_else(|| body_json.get("size").and_then(|x| x.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let resolution = body_json.get("resolution").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let seconds = match body_json.get("duration").or_else(|| body_json.get("seconds")) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => "".to_string(),
+    };
+    let full_prompt = prompt_with_params(&prompt, &aspect, &seconds, &resolution);
 
     util::log(&format!(
         "[视频] 收到{}：{}",
@@ -1225,7 +1323,7 @@ fn generate_video(stream: &mut TcpStream, req: &Req) {
         .unwrap_or_else(|e| e.into_inner());
 
     let started = util::now_ms();
-    match produce_video(&prompt, &refs) {
+    match produce_video(&full_prompt, &refs) {
         Ok(res) => {
             let cost = ((util::now_ms().saturating_sub(started)) as f64) / 1000.0;
             util::log(&format!("[视频] 完成（{:.1}s）{} {}KB", cost, res.name, res.bytes / 1024));
@@ -2325,4 +2423,36 @@ static PANEL: &str = include_str!("panel.html");
 /// 注入给 WebView2 的页面内容
 pub fn panel_html() -> String {
     PANEL.to_string()
+}
+
+#[cfg(test)]
+mod video_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn picture_token_normalize() {
+        // 标准标记
+        assert_eq!(normalize_picture_tokens("<Picture 1>阿姨走进来"), "第1张参考图阿姨走进来");
+        // @图 带空格
+        assert_eq!(normalize_picture_tokens("@图 2 在笑"), "第2张参考图 在笑");
+        // @图 不带空格
+        assert_eq!(normalize_picture_tokens("@图3"), "第3张参考图");
+        // 两位数编号
+        assert_eq!(normalize_picture_tokens("<Picture 10>X"), "第10张参考图X");
+        // 无标记原样返回
+        assert_eq!(normalize_picture_tokens("普通提示词"), "普通提示词");
+        // 不是标记的小于号不动
+        assert_eq!(normalize_picture_tokens("a < b"), "a < b");
+        // 多个标记
+        assert_eq!(
+            normalize_picture_tokens("<Picture 1>站在左边，<Picture 2>站在右边"),
+            "第1张参考图站在左边，第2张参考图站在右边"
+        );
+    }
+
+    #[test]
+    fn params_prefix() {
+        assert_eq!(prompt_with_params("跑步", "9:16", "8", "720p"), "（画面比例 9:16，分辨率 720p，时长 8 秒）跑步");
+        assert_eq!(prompt_with_params("跑步", "", "", ""), "跑步");
+    }
 }
