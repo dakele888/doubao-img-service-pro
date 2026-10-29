@@ -128,6 +128,62 @@ const __needLogin = ((/扫码登录|手机号登录|立即登录|登录后即可
 async function main() {
   let needRename = false;
   let convHit = null;
+  // 嗅探页面自己的网络响应：豆包前端拉消息/作品列表时带 image_ori_raw（无水印原图档），
+  // 提前按图片 hash 缓存起来，生成完直接取，不用刷新页面。
+  try {
+    await page.evaluate(() => {
+      if (window.__mohaRawHook) return;
+      window.__mohaRawHook = 1;
+      const RAW = (window.__mohaRaw = {});
+      function scan(obj) {
+        try {
+          if (!obj || typeof obj !== "object") return;
+          if (Array.isArray(obj)) { obj.forEach(scan); return; }
+          for (const k in obj) {
+            const v = obj[k];
+            if (v && typeof v === "object") {
+              const r = v.image_ori_raw || (v.image && v.image.image_ori_raw);
+              const u = r && r.url;
+              if (u) {
+                const m = String(u).match(/rc_gen_image\/([^?\/~]+)/);
+                if (m) RAW[m[1]] = String(u);
+              }
+              scan(v);
+            }
+          }
+        } catch (e) {}
+      }
+      if (window.fetch) {
+        const of_ = window.fetch;
+        window.fetch = function () {
+          const p = of_.apply(this, arguments);
+          try {
+            p.then((res) => {
+              try {
+                const ct = (res.headers && res.headers.get("content-type")) || "";
+                if (ct.indexOf("json") >= 0) res.clone().json().then(scan).catch(() => {});
+              } catch (e) {}
+            }).catch(() => {});
+          } catch (e) {}
+          return p;
+        };
+      }
+      const oo = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (m, u) { this.__mohaUrl = u; return oo.apply(this, arguments); };
+      const os = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.send = function () {
+        try {
+          this.addEventListener("load", () => {
+            try {
+              const t = this.responseText || "";
+              if (t.indexOf("image_ori_raw") >= 0 && t.length < 8e6) scan(JSON.parse(t));
+            } catch (e) {}
+          });
+        } catch (e) {}
+        return os.apply(this, arguments);
+      };
+    });
+  } catch (e) {}
   try {
     const convs = await listConvs();
     convHit = convs.find((c) => c.name === CONV_NAME) || null;
@@ -296,8 +352,10 @@ async function main() {
     // 刚生成的图数据常常还没带 raw，等不到就刷新一次页面再找。
     async function findRaw(key) {
       return await page.evaluate((k) => {
-        const res = { targets: 0, found: null, err: null };
+        const res = { targets: 0, found: null, err: null, cached: false };
         try {
+          const RAW = window.__mohaRaw || {};
+          if (RAW[k]) { res.found = RAW[k]; res.cached = true; return res; }
           // 防止 fiber 对象图太大拖垮执行：限制访问节点数
           let budget = 200000;
           function walk(obj, key, out, depth, seen) {

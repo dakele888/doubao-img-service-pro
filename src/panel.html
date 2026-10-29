@@ -157,6 +157,9 @@ button.danger:hover{background:#fdf1f0}
 
 <div class="card">
   <h2>已缓存图片 <span class="stat" id="stat"></span></h2>
+  <div style="display:flex;justify-content:flex-end;margin:-6px 0 8px">
+    <button class="pill" onclick="refreshImages()" title="重新读取缓存目录">↻ 刷新图片</button>
+  </div>
   <div class="grid" id="grid"></div>
   <div class="empty" id="empty" style="display:none">还没有图片</div>
 </div>
@@ -400,6 +403,23 @@ function load(){
       g.appendChild(w);
     });
   });
+}
+// 只刷新图片网格，不动上面正在编辑的表单
+function refreshImages(){
+  api('/api/images').then(function(d){
+    var g=$('grid');g.innerHTML='';
+    $('empty').style.display=d.images.length?'none':'block';
+    $('stat').textContent='（'+d.stat.count+' 张，'+fmt(d.stat.bytes)+'）';
+    d.images.forEach(function(it){
+      var w=document.createElement('div');w.className='ph';
+      w.innerHTML='<img src="'+BASE+'/files/'+it.name+'?t='+Date.now()+'" loading="lazy">'+
+        '<button class="x" title="删除">×</button>'+
+        '<div class="m"><span>'+fmt(it.size)+'</span><span>'+new Date(it.mtime).toLocaleTimeString('zh-CN',{hour12:false})+'</span></div>';
+      w.querySelector('.x').onclick=function(){del(it.name)};
+      g.appendChild(w);
+    });
+    toast('已刷新，共 '+d.stat.count+' 张');
+  }).catch(function(){toast('刷新失败');});
 }
 function saveConv(){
   api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({conversationName:$('convName').value.trim()})})
