@@ -1034,6 +1034,10 @@ impl VideoJob {
             "prompt": self.prompt,
             "url": self.url,
             "error": self.error,
+            // OpenAI 视频对象规范里的字段，即使没有也补上，保证结构完整
+            "completed_at": if self.status == "completed" { json!(self.created_at) } else { Value::Null },
+            "expires_at": Value::Null,
+            "remixed_from_video_id": Value::Null,
         })
     }
 }
