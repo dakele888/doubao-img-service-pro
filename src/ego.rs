@@ -660,6 +660,21 @@ async function installHook() {
   } catch (e) {}
 }
 
+// 豆包聊天区要滚到最底才能看到最新消息；视频封面在视口外时点击无效，所以每轮都滚一下
+async function scrollToLatest() {
+  try {
+    await page.evaluate(() => {
+      const boxes = Array.from(document.querySelectorAll("div")).filter(function (el) {
+        const st = getComputedStyle(el);
+        return el.scrollHeight > el.clientHeight + 80 && /auto|scroll/.test(st.overflowY);
+      });
+      boxes.sort(function (a, b) { return b.scrollHeight - a.scrollHeight; });
+      if (boxes[0]) boxes[0].scrollTop = boxes[0].scrollHeight;
+      window.scrollTo(0, document.body.scrollHeight);
+    });
+  } catch (e) {}
+}
+
 function videoUrls() {
   return page.evaluate(() => {
     const out = [];
@@ -946,6 +961,7 @@ async function main() {
     await page.keyboard.insertText(PROMPT);
     await page.waitForTimeout(600);
     await page.press("css:.tiptap", "Enter");
+    await scrollToLatest();
     // 提交时也可能才弹安全确认
     await dismissSafetyDialog();
     // 豆包先回一张「视频生成参数确认」卡，点确认才真正开始生成
@@ -963,6 +979,7 @@ async function main() {
   while (Date.now() < deadline) {
     try {
       await page.waitForTimeout(3000);
+      await scrollToLatest();
       // 参数确认卡可能晚几秒才出现，没点中就再试
       if (confirmTries < 2) {
         const c = await tryConfirmVideoParams();
