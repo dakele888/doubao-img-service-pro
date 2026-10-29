@@ -859,33 +859,19 @@ async function pickModel() {
 // 点「确认」才真正开始生成。有时不弹这张卡（直接生成），所以做成"有就点、没有就跳过"。
 // 返回 clicked / found-no-button / none
 async function tryConfirmVideoParams() {
-  // 豆包发的是一张纯文本的「参数确认」卡，结尾写「确认后我再开始生成视频」——
-  // 它不是按钮，要你再回一条消息才会真的开始生成。少数版本可能带按钮，所以先试按钮。
+  // 实测：豆包发的是一张纯文本的「参数确认」卡，页面上没有任何确认按钮，
+  // 它就是在等你回一条消息。所以这里只发消息，不去找按钮（找按钮会误点删除确认框之类的框）。
   const found = await page.evaluate(() =>
     /视频生成参数确认|确认后我再开始生成|请先确认以下参数/.test((document.body.innerText || "").slice(-3000))
   );
   if (!found) return "none";
-
-  const byBtn = await page.evaluate(() => {
-    for (const n of [...document.querySelectorAll("button,[role=button]")]) {
-      const s = (n.innerText || "").trim();
-      if (s !== "确认" && s !== "确认生成" && s !== "开始生成" && s !== "继续") continue;
-      if (n.getBoundingClientRect().width <= 0) continue;
-      n.click();
-      return "clicked-btn:" + s;
-    }
-    return "";
-  });
-  if (byBtn) return byBtn;
-
-  // 没有按钮：直接回一条「确认」
   try {
     await page.click("css:.tiptap");
     await page.waitForTimeout(300);
     await page.keyboard.insertText("确认");
     await page.waitForTimeout(500);
     await page.press("css:.tiptap", "Enter");
-    return "clicked:text";
+    return "sent-text";
   } catch (e) {
     return "failed:" + String((e && e.message) || e);
   }
