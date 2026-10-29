@@ -15,7 +15,13 @@
 
 不想自己编译，直接下现成的：
 
-**[⬇ 豆包生图服务.exe（719 KB）](https://gitee.com/super88888/doubao-img-service/releases/latest)**
+**[⬇ 下载豆包生图服务.exe（719 KB）](https://gitee.com/super88888/doubao-img-service/releases)**
+
+进「发行版」页面，附件里就是 exe。直链（版本升级会变）：
+
+```
+https://gitee.com/super88888/doubao-img-service/releases/download/v1.0.0/豆包生图服务.exe
+```
 
 双击运行，不需要 Node / .NET / VC 运行库。**但必须先装 ego lite 并登录豆包**，否则生成不了图，详见下面「换一台电脑 / 发给别人用」。
 
