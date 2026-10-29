@@ -2021,7 +2021,7 @@ fn parse_multipart_fields(body: &[u8], ctype: &str) -> Vec<(String, String)> {
             val.truncate(p);
         }
         let val = val.trim().to_string();
-        if !val.is_empty() && val.len() < 4096 {
+        if !val.is_empty() && val.len() < 65536 {
             out.push((name, val));
         }
     }
@@ -2543,5 +2543,62 @@ mod multipart_field_tests {
         assert_eq!(f.len(), 1, "got {:?}", f);
         assert_eq!(f[0].0, "duration");
         assert_eq!(f[0].1, "9");
+    }
+}
+
+#[cfg(test)]
+mod real_request_tests {
+    use super::*;
+
+    // 完全按魔哈自定义视频接口的格式构造：7 个文本字段 + 2 张参考图（同名字段）
+    fn build_moha_multipart() -> Vec<u8> {
+        let png: [u8; 16] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52];
+        let mut b: Vec<u8> = Vec::new();
+        let fields = [
+            ("model", "seedance-2.0-fast"),
+            ("prompt", "第1张参考图苏梨在厨房盛面，第2张参考图贺燃靠在岛台边"),
+            ("aspect_ratio", "16:9"),
+            ("resolution", "720p"),
+            ("duration", "8"),
+            ("mode", "reference_to_video"),
+            ("generate_audio", "1"),
+        ];
+        for (k, v) in fields.iter() {
+            b.extend_from_slice(
+                format!("--BND\r\nContent-Disposition: form-data; name=\"{}\"\r\n\r\n{}\r\n", k, v).as_bytes(),
+            );
+        }
+        for n in ["a.png", "b.png"].iter() {
+            b.extend_from_slice(
+                format!("--BND\r\nContent-Disposition: form-data; name=\"reference_images\"; filename=\"{}\"\r\nContent-Type: image/png\r\n\r\n", n).as_bytes(),
+            );
+            b.extend_from_slice(&png);
+            b.extend_from_slice(b"\r\n");
+        }
+        b.extend_from_slice(b"--BND--\r\n");
+        b
+    }
+
+    #[test]
+    fn text_fields_all_parsed() {
+        let b = build_moha_multipart();
+        let f = parse_multipart_fields(&b, "multipart/form-data; boundary=BND");
+        assert_eq!(f.len(), 7, "应提取 7 个文本字段，实际 {:?}", f);
+        let get = |k: &str| f.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).unwrap_or_default();
+        assert_eq!(get("model"), "seedance-2.0-fast");
+        assert_eq!(get("aspect_ratio"), "16:9");
+        assert_eq!(get("resolution"), "720p");
+        assert_eq!(get("duration"), "8");
+        assert_eq!(get("mode"), "reference_to_video");
+        assert_eq!(get("generate_audio"), "1");
+        assert!(get("prompt").contains("苏梨"));
+    }
+
+    #[test]
+    fn images_all_parsed() {
+        let b = build_moha_multipart();
+        let (prompt, _, refs) = parse_multipart_req(&b, "multipart/form-data; boundary=BND").expect("解析失败");
+        assert!(prompt.contains("苏梨"), "prompt={}", prompt);
+        assert_eq!(refs.len(), 2, "应有 2 张参考图，实际 {}", refs.len());
     }
 }
