@@ -320,11 +320,22 @@ function checkVer(manual){
   if(manual&&b) b.textContent='检查中…';
   // 手动点击强制跳过服务端缓存，立刻查 Gitee
   api(manual?'/api/version?force=1':'/api/version').then(function(d){
+    // checked=false 表示压根没查到，绝不能当成"已是最新"
+    if(d.checked===false){
+      VER.current=d.current||VER.current;
+      if(b){
+        b.textContent='检查失败';
+        b.classList.remove('upd');
+        b.title=d.error||'检查失败';
+      }
+      if(manual) toast('检查失败：'+(d.error||'网络不通或 Gitee 访问不了'));
+      return;
+    }
     renderVer(d);
     if(manual) toast(d.hasUpdate?('发现新版本 v'+d.latest):('已是最新版本 v'+d.current));
   }).catch(function(){
-    if(b) b.textContent='v'+(VER.current||'');
-    if(manual) toast('检查失败：网络不通或 Gitee 访问不了');
+    if(b){ b.textContent='检查失败'; b.title='请求本地服务失败'; }
+    if(manual) toast('检查失败：请求本地服务无响应');
   });
 }
 // 等新进程起来：轮询 /api/version，版本号对上就刷新页面

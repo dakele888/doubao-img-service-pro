@@ -572,7 +572,7 @@ fn route(stream: &mut TcpStream, req: Req) {
     if m == "GET" && p == "/api/version" {
         let force = req.query.split('&').any(|kv| kv == "force=1");
         let current = env!("CARGO_PKG_VERSION").to_string();
-        let rel = latest_release(force);
+        let (rel, err) = latest_release(force);
         let has = rel.as_ref().map(|r| is_newer(&r.tag, &current)).unwrap_or(false);
         return json_resp(
             stream,
@@ -581,6 +581,9 @@ fn route(stream: &mut TcpStream, req: Req) {
                 "current": current,
                 "latest": rel.as_ref().map(|r| r.tag.clone()),
                 "hasUpdate": has,
+                // checked=false 表示根本没查到，前端不能当成“已是最新”
+                "checked": err.is_none(),
+                "error": err.unwrap_or_default(),
                 "downloadUrl": rel.as_ref().map(|r| r.url.clone()).unwrap_or_default(),
                 "url": "https://gitee.com/super88888/doubao-img-service/releases",
             }),
@@ -1441,7 +1444,8 @@ fn parse_multipart_req(body: &[u8], ctype: &str) -> Result<(String, bool, Vec<eg
 }
 
 // ---------- 版本检测 ----------
-static VER_CACHE: OnceLock<std::sync::Mutex<Option<(u64, Option<Release>)>>> = OnceLock::new();
+static VER_CACHE: OnceLock<std::sync::Mutex<Option<(u64, Option<Release>, Option<String>)>>> =
+    OnceLock::new();
 
 fn ver_tuple(s: &str) -> Vec<u32> {
     s.split(|c: char| !c.is_ascii_digit())
@@ -1469,58 +1473,131 @@ struct Release {
     url: String,
 }
 
-/// 查 Gitee 上最新发行版的 tag 和 exe 下载地址，10 分钟内复用缓存；force=true 跳过缓存直接查
-fn latest_release(force: bool) -> Option<Release> {
+/// 查询失败的原因，决定给用户看什么提示
+#[derive(Debug)]
+enum FetchErr {
+    /// 403/404：仓库私有、没权限、或被风控拦
+    Forbidden,
+    /// 连不上、超时
+    Network,
+    /// 连上了但内容不对
+    Bad(String),
+}
+
+impl FetchErr {
+    fn hint(&self) -> String {
+        match self {
+            FetchErr::Forbidden => "Gitee 拒绝访问（HTTP 403/404）。仓库若已设为私有，匿名访问拿不到版本号，请把仓库改回公开，或在软件里配置访问令牌".into(),
+            FetchErr::Network => "连不上 Gitee，检查网络或代理".into(),
+            FetchErr::Bad(s) => format!("Gitee 返回内容异常：{}", s),
+        }
+    }
+}
+
+/// curl 发 GET，返回 (HTTP 状态码, 主体)；redirect_only=true 时主体位置是重定向地址
+fn curl_get(url: &str, redirect_only: bool) -> Result<(u16, String), FetchErr> {
+    let mut cmd = Command::new("curl");
+    cmd.arg("-sS").args(["--max-time", "10"]);
+    if redirect_only {
+        cmd.args(["-o", "NUL", "-w", "%{redirect_url}\n%{http_code}"]);
+    } else {
+        cmd.args(["-w", "\n%{http_code}"]);
+    }
+    // 用浏览器 UA，降低被 Gitee 风控当爬虫拦的概率
+    cmd.args([
+        "-H",
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "-H",
+        "Accept: text/html,application/json,*/*",
+        "-H",
+        "Accept-Language: zh-CN,zh;q=0.9",
+        url,
+    ]);
+    let out = cmd
+        .creation_flags(util::CREATE_NO_WINDOW)
+        .output()
+        .map_err(|_| FetchErr::Network)?;
+    let s = String::from_utf8_lossy(&out.stdout).to_string();
+    let (body, code) = match s.rsplit_once('\n') {
+        Some((b, c)) => (b.to_string(), c.trim().parse::<u16>().unwrap_or(0)),
+        None => (String::new(), 0),
+    };
+    if code == 0 {
+        return Err(FetchErr::Network);
+    }
+    Ok((code, body))
+}
+
+/// 查 Gitee 上最新发行版，10 分钟内复用缓存；force=true 跳过缓存直接查。
+/// 返回 (结果, 错误提示)；两者互斥，都拿不到时���误提示一定有值。
+fn latest_release(force: bool) -> (Option<Release>, Option<String>) {
     let m = VER_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if !force {
         if let Ok(g) = m.lock() {
-            if let Some((at, v)) = g.as_ref() {
+            if let Some((at, rel, err)) = g.as_ref() {
                 if util::now_ms().saturating_sub(*at) < 10 * 60 * 1000 {
-                    return v.clone();
+                    return (rel.clone(), err.clone());
                 }
             }
         }
     }
     // 主通道：官方 API（能拿到准确附件名和地址）
-    let mut rel = fetch_release_api();
-    // 兜底通道：API 有每小时限流，撞上了就走网页重定向拿版本号
-    if rel.is_none() {
-        rel = fetch_release_web();
-        if rel.is_some() {
-            util::log("[更新] API 不可用（多为限流），已改用网页通道获取版本");
+    let (rel, err) = match fetch_release_api() {
+        Ok(r) => (Some(r), None),
+        Err(api_err) => {
+            // 兜底通道：网页重定向（API 限流/风控时还能用）
+            match fetch_release_web() {
+                Ok(r) => {
+                    util::log(&format!(
+                        "[更新] API 不可用（{}），已改用网页通道",
+                        api_err.hint()
+                    ));
+                    (Some(r), None)
+                }
+                Err(web_err) => {
+                    // 两条都不通：优先报 API 的错误（通常是真正的故障原因）
+                    let msg = if matches!(api_err, FetchErr::Forbidden) {
+                        api_err.hint()
+                    } else {
+                        format!("{}；网页通道也没通：{}", api_err.hint(), web_err.hint())
+                    };
+                    util::log(&format!("[更新] 检查失败：{}", msg));
+                    (None, Some(msg))
+                }
+            }
         }
-    }
-    // 查到了就更新缓存；没查到时保留旧缓存，别让一次网络抖动把已知数据清掉
+    };
+    // 成功就写缓存；失败保留上次成功的缓存，别让一次网络抖动把已知数据清掉
     if let Ok(mut g) = m.lock() {
-        if rel.is_some() || g.as_ref().map(|(_, v)| v.is_none()).unwrap_or(true) {
-            *g = Some((util::now_ms(), rel.clone()));
+        let has_good = g.as_ref().map(|(_, r, _)| r.is_some()).unwrap_or(false);
+        if rel.is_some() || !has_good {
+            *g = Some((util::now_ms(), rel.clone(), err.clone()));
         }
     }
-    rel
+    (rel, err)
 }
 
-/// Gitee 官方 API：匿名调用每小时有配额，超了返回 403
-fn fetch_release_api() -> Option<Release> {
-    let out = Command::new("curl")
-        .args([
-            "-sS",
-            "--max-time",
-            "10",
-            "-H",
-            "User-Agent: doubao-img",
-            "https://gitee.com/api/v5/repos/super88888/doubao-img-service/releases/latest",
-        ])
-        .creation_flags(util::CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    let v = serde_json::from_slice::<Value>(&out.stdout).ok()?;
+/// Gitee 官方 API：匿名访问私有仓库会 403
+fn fetch_release_api() -> Result<Release, FetchErr> {
+    let (code, body) = curl_get(
+        "https://gitee.com/api/v5/repos/super88888/doubao-img-service/releases/latest",
+        false,
+    )?;
+    if code == 403 || code == 404 {
+        return Err(FetchErr::Forbidden);
+    }
+    if code != 200 {
+        return Err(FetchErr::Bad(format!("HTTP {}", code)));
+    }
+    let v: Value =
+        serde_json::from_str(&body).map_err(|_| FetchErr::Bad("返回的不是 JSON".into()))?;
     let tag = v
         .get("tag_name")
         .and_then(|x| x.as_str())
         .map(|s| s.trim_start_matches('v').to_string())
         .unwrap_or_default();
     if tag.is_empty() {
-        return None;
+        return Err(FetchErr::Bad("没有 tag_name".into()));
     }
     // Gitee 会自带源码 zip，这里只挑 exe 附件
     let url = v
@@ -1538,40 +1615,36 @@ fn fetch_release_api() -> Option<Release> {
         .and_then(|x| x.as_str())
         .unwrap_or("")
         .to_string();
-    Some(Release { tag, url })
+    Ok(Release { tag, url })
 }
 
-/// 网页通道（不走 API，不限流）：
+/// 网页通道（不走 API）：
 /// https://gitee.com/.../releases/latest 会 302 到 /releases/tag/v1.2.5，从跳转地址取版本号；
 /// 下载地址按固定模式拼（附件名固定为 豆包生图服务.exe，URL 编码写死）。
-fn fetch_release_web() -> Option<Release> {
-    let out = Command::new("curl")
-        .args([
-            "-sS",
-            "--max-time",
-            "10",
-            "-o",
-            "NUL",
-            "-w",
-            "%{redirect_url}",
-            "-H",
-            "User-Agent: doubao-img",
-            "https://gitee.com/super88888/doubao-img-service/releases/latest",
-        ])
-        .creation_flags(util::CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
-    let loc = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let tag = loc.rsplit('/').next().unwrap_or("").trim_start_matches('v').to_string();
+fn fetch_release_web() -> Result<Release, FetchErr> {
+    let (code, loc) = curl_get(
+        "https://gitee.com/super88888/doubao-img-service/releases/latest",
+        true,
+    )?;
+    if code == 403 || code == 404 {
+        return Err(FetchErr::Forbidden);
+    }
+    let tag = loc
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('v')
+        .to_string();
     // 只有版本号形态才对，跳登录页之类的一律不认
     if tag.is_empty() || !tag.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-        return None;
+        return Err(FetchErr::Bad(format!("重定向地址异常（HTTP {}）", code)));
     }
     let url = format!(
         "https://gitee.com/super88888/doubao-img-service/releases/download/v{}/%E8%B1%86%E5%8C%85%E7%94%9F%E5%9B%BE%E6%9C%8D%E5%8A%A1.exe",
         tag
     );
-    Some(Release { tag, url })
+    Ok(Release { tag, url })
 }
 
 /// 用 ShellExecute 拉起新进程：参数走命令行，新进程由系统 shell 创建
@@ -1613,7 +1686,8 @@ fn do_update(report: &dyn Fn(u8, &str)) -> Result<Value, String> {
     let cur = env!("CARGO_PKG_VERSION").to_string();
     report(1, "正在检查最新版本…");
     *VER_CACHE.get_or_init(|| std::sync::Mutex::new(None)).lock().unwrap() = None; // 强制重查
-    let rel = latest_release(true).ok_or("查不到最新版本（网络不通或 Gitee 访问不了）")?;
+    let (rel, err) = latest_release(true);
+    let rel = rel.ok_or_else(|| err.unwrap_or_else(|| "查不到最新版本".into()))?;
     if !is_newer(&rel.tag, &cur) {
         report(6, "已是最新版本");
         return Ok(json!({ "ok": true, "upToDate": true, "current": cur, "latest": rel.tag }));
