@@ -742,6 +742,92 @@ async function dismissSafetyDialog() {
   return false;
 }
 
+// 设置画面参数：输入框上方有「自动 · Ns」控件，点开是「比例 + 时长」面板。
+// 比例是 7 个按钮（自动/3:4/4:3/9:16/16:9/1:1/21:9），时长是 4~15s 的自定义滑杆。
+// 参数从提示词前缀里取（服务端已拼成「（画面比例 9:16，分辨率 720p，时长 12 秒）…」）。
+// 任何一步失败都不阻断生成，只写进返回值。
+async function setVideoParams() {
+  const res = { panel: false, ratio: "", duration: 0 };
+  const am = PROMPT.match(/画面比例\s*([0-9]+:[0-9]+)/);
+  const aspect = am ? am[1] : "";
+  const dm = PROMPT.match(/时长\s*([0-9]+)\s*秒/);
+  const seconds = dm ? parseInt(dm[1], 10) : 0;
+
+  // 1) 打开参数面板
+  const opened = await page.evaluate(() => {
+    const nodes = [...document.querySelectorAll("span,div,button")];
+    for (const n of nodes) {
+      if (n.children.length !== 0) continue;
+      const t = (n.innerText || "").trim();
+      if (!/^自动\s*·\s*[0-9]+\s*s$/.test(t) && t !== "自动") continue;
+      const r = n.getBoundingClientRect();
+      if (r.width <= 0) continue;
+      const target = n.closest("button") || n.parentElement || n;
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+      }
+      return t;
+    }
+    return null;
+  });
+  if (!opened) return res;
+  await page.waitForTimeout(900);
+  res.panel = await page.evaluate(() => /比例[\s\S]{0,60}时长/.test(document.body.innerText || ""));
+  if (!res.panel) return res;
+
+  // 2) 选比例
+  if (aspect) {
+    const ok = await page.evaluate((a) => {
+      for (const b of [...document.querySelectorAll("button")]) {
+        if ((b.innerText || "").trim() !== a) continue;
+        if (b.getBoundingClientRect().width <= 0) continue;
+        b.click();
+        return true;
+      }
+      return false;
+    }, aspect);
+    if (ok) {
+      res.ratio = aspect;
+      await page.waitForTimeout(500);
+    }
+  }
+
+  // 3) 拖时长滑杆（4~15s）
+  if (seconds) {
+    const pt = await page.evaluate((s) => {
+      const lbl = [...document.querySelectorAll("*")].find(
+        (el) => el.children.length === 0 && (el.innerText || "").trim() === "时长"
+      );
+      if (!lbl) return null;
+      let box = lbl.parentElement;
+      for (let i = 0; i < 4 && box; i++) {
+        const t = box.innerText || "";
+        if (t.indexOf("4s") >= 0 && t.indexOf("15s") >= 0) break;
+        box = box.parentElement;
+      }
+      if (!box) return null;
+      const cands = [...box.querySelectorAll("*")]
+        .map((n) => ({ n: n, r: n.getBoundingClientRect() }))
+        .filter((x) => x.r.width > 150 && x.r.height > 2 && x.r.height < 26 && !(x.n.innerText || "").trim())
+        .sort((a, b) => b.r.y - a.r.y);
+      if (!cands.length) return null;
+      const r = cands[0].r;
+      const ratio = Math.max(0, Math.min(1, (s - 4) / 11));
+      return { x: Math.round(r.x + r.width * ratio), y: Math.round(r.y + r.height / 2) };
+    }, seconds);
+    if (pt) {
+      await page.mouse.click(pt.x, pt.y);
+      res.duration = seconds;
+      await page.waitForTimeout(400);
+    }
+  }
+
+  // 4) 收起面板
+  try { await page.keyboard.press("Escape"); } catch (e) {}
+  await page.waitForTimeout(300);
+  return res;
+}
+
 try { await ensureChat(); } catch (e) {}
 
 // 未登录直接报错，别等十分钟
@@ -775,6 +861,8 @@ async function main() {
   const mode = await enterVideoMode();
   // 切到视频模式后可能立刻弹安全确认，先处理掉，不然输入框被遮罩挡住
   const safetyAfterMode = await dismissSafetyDialog();
+  // 按请求里的比例/时长去点豆包的参数面板（失败不影响生成）
+  const params = await setVideoParams();
 
   // 记录发之前已有的视频地址，之后只认新增的
   const before = {};
@@ -818,6 +906,7 @@ async function main() {
       mode: mode,
       convUrl: convUrl,
       pageTail: tail,
+      params: params,
     });
     return;
   }
@@ -831,6 +920,7 @@ async function main() {
     mode: mode,
     refs: REFS.length,
     pageTail: tail,
+      params: params,
   });
 }
 
