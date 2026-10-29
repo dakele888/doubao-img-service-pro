@@ -980,23 +980,25 @@ fn normalize_picture_tokens(prompt: &str) -> String {
 /// 把画面参数转成一句自然语言垫在提示词前面。
 /// 豆包网页版没有可靠的比例/时长控件，用文字约束最稳。
 fn prompt_with_params(prompt: &str, aspect: &str, dur: &str, res: &str, model: &str) -> String {
-    let mut tags: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
     if !model.is_empty() && model != "doubao-video" {
-        tags.push(format!("模型 {}", model));
+        lines.push(format!("- 模型：{}", model));
     }
     if !aspect.is_empty() {
-        tags.push(format!("画面比例 {}", aspect));
+        lines.push(format!("- 画面比例：{}", aspect));
     }
     if !res.is_empty() {
-        tags.push(format!("分辨率 {}", res));
+        lines.push(format!("- 清晰度：{}", res));
     }
     if !dur.is_empty() {
-        tags.push(format!("时长 {} 秒", dur));
+        lines.push(format!("- 视频总时长：严格 {} 秒，不要加长也不要缩短", dur));
     }
-    if tags.is_empty() {
+    if lines.is_empty() {
         return prompt.to_string();
     }
-    format!("（{}）{}", tags.join("，"), prompt)
+    // 用模版化声明而不是括号前缀：豆包的确认卡片本来就是按提示词理解参数的，
+    // 写成清单式、明确「严格遵守」，它复述出来的参数才和请求一致。
+    format!("【生成参数 · 请严格遵守】\n{}\n\n【正文】\n{}", lines.join("\n"), prompt)
 }
 
 // ---------------- OpenAI 通用视频接口（异步任务制） ----------------
@@ -2519,9 +2521,15 @@ mod video_prompt_tests {
 
     #[test]
     fn params_prefix() {
-        assert_eq!(prompt_with_params("跑步", "9:16", "8", "720p", ""), "（画面比例 9:16，分辨率 720p，时长 8 秒）跑步");
+        let r = prompt_with_params("跑步", "9:16", "8", "720p", "");
+        assert!(r.contains("- 画面比例：9:16"), "{}", r);
+        assert!(r.contains("- 清晰度：720p"), "{}", r);
+        assert!(r.contains("- 视频总时长：严格 8 秒"), "{}", r);
+        assert!(r.contains("【正文】"), "{}", r);
+        assert!(r.ends_with("跑步"), "{}", r);
         assert_eq!(prompt_with_params("跑步", "", "", "", ""), "跑步");
-        assert_eq!(prompt_with_params("跑步", "", "", "", "seedance-2.0-fast"), "（模型 seedance-2.0-fast）跑步");
+        let r2 = prompt_with_params("跑步", "", "", "", "seedance-2.0-fast");
+        assert!(r2.contains("- 模型：seedance-2.0-fast"), "{}", r2);
     }
 }
 

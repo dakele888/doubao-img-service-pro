@@ -836,94 +836,15 @@ async function tryConfirmVideoParams() {
 // 参数从提示词前缀里取（服务端已拼成「（画面比例 9:16，分辨率 720p，时长 12 秒）…」）。
 // 任何一步失败都不阻断生成，只写进返回值。
 async function setVideoParams() {
-  const res = { model: "", panel: false, ratio: "", duration: 0 };
-  // 先按请求切模型（认不出就保持原样），再设比例和时长
+  // 比例和时长不再点面板：豆包的确认卡片本来就是按提示词理解参数的，
+  // 服务端已经把参数写成模版声明放在提示词最前面（【生成参数 · 请严格遵守】）。
+  // 只有模型必须点面板 —— 它决定计费档位（Seedance 2.5 是 5 倍消耗）。
+  const res = { model: "", panel: false, ratio: "", duration: 0, via: "prompt" };
   res.model = await pickModel();
-  const am = PROMPT.match(/画面比例\s*([0-9]+:[0-9]+)/);
-  const aspect = am ? am[1] : "";
-  const dm = PROMPT.match(/时长\s*([0-9]+)\s*秒/);
-  const seconds = dm ? parseInt(dm[1], 10) : 0;
-
-  // 1) 打开参数面板
-  const opened = await page.evaluate(() => {
-    const nodes = [...document.querySelectorAll("span,div,button")];
-    for (const n of nodes) {
-      if (n.children.length !== 0) continue;
-      const t = (n.innerText || "").trim();
-      if (!/^自动\s*·\s*[0-9]+\s*s$/.test(t) && t !== "自动") continue;
-      const r = n.getBoundingClientRect();
-      if (r.width <= 0) continue;
-      const target = n.closest("button") || n.parentElement || n;
-      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
-      }
-      return t;
-    }
-    return null;
-  });
-  if (!opened) return res;
-  await page.waitForTimeout(900);
-  res.panel = await page.evaluate(() => /比例[\s\S]{0,60}时长/.test(document.body.innerText || ""));
-  if (!res.panel) return res;
-
-  // 2) 选比例
-  if (aspect) {
-    const ok = await page.evaluate((a) => {
-      for (const b of [...document.querySelectorAll("button")]) {
-        if ((b.innerText || "").trim() !== a) continue;
-        if (b.getBoundingClientRect().width <= 0) continue;
-        b.click();
-        return true;
-      }
-      return false;
-    }, aspect);
-    if (ok) {
-      res.ratio = aspect;
-      await page.waitForTimeout(500);
-    }
-  }
-
-  // 3) 拖时长滑杆（4~15s）
-  if (seconds) {
-    const pt = await page.evaluate((s) => {
-      const lbl = [...document.querySelectorAll("*")].find(
-        (el) => el.children.length === 0 && (el.innerText || "").trim() === "时长"
-      );
-      if (!lbl) return null;
-      let box = lbl.parentElement;
-      for (let i = 0; i < 4 && box; i++) {
-        const t = box.innerText || "";
-        if (t.indexOf("4s") >= 0 && t.indexOf("15s") >= 0) break;
-        box = box.parentElement;
-      }
-      if (!box) return null;
-      const cands = [...box.querySelectorAll("*")]
-        .map((n) => ({ n: n, r: n.getBoundingClientRect() }))
-        .filter((x) => x.r.width > 150 && x.r.height > 2 && x.r.height < 26 && !(x.n.innerText || "").trim())
-        .sort((a, b) => b.r.y - a.r.y);
-      if (!cands.length) return null;
-      const r = cands[0].r;
-      const ratio = Math.max(0, Math.min(1, (s - 4) / 11));
-      return { x: Math.round(r.x + r.width * ratio), y: Math.round(r.y + r.height / 2) };
-    }, seconds);
-    if (pt) {
-      await page.mouse.click(pt.x, pt.y);
-      res.duration = seconds;
-      await page.waitForTimeout(400);
-    }
-  }
-
-  // 4) 收起面板（实测 Esc 不一定有效，还开着就点空白区域）
-  for (let i = 0; i < 4; i++) {
-    const open = await page.evaluate(() => /比例[\s\S]{0,40}时长/.test((document.body.innerText || "").slice(-700)));
-    if (!open) break;
-    try { await page.keyboard.press("Escape"); } catch (e) {}
-    await page.waitForTimeout(450);
-    const still = await page.evaluate(() => /比例[\s\S]{0,40}时长/.test((document.body.innerText || "").slice(-700)));
-    if (!still) break;
-    try { await page.mouse.click(420, 260); } catch (e) {}
-    await page.waitForTimeout(450);
-  }
+  const am = PROMPT.match(/画面比例[：:\s]*([0-9]+:[0-9]+)/);
+  if (am) res.ratio = am[1];
+  const dm = PROMPT.match(/总时长[：:\s]*严格\s*([0-9]+)\s*秒/) || PROMPT.match(/时长\s*([0-9]+)\s*秒/);
+  if (dm) res.duration = parseInt(dm[1], 10);
   return res;
 }
 
