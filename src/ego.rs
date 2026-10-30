@@ -1056,7 +1056,6 @@ async function main() {
   let coverState = "";
   let pauseState = "";
   let wmState = "";
-  let failState = "";
   try {
     await page.click("css:.tiptap");
     await page.waitForTimeout(300);
@@ -1077,85 +1076,37 @@ async function main() {
   const deadline = Date.now() + @@DEADLINE@@;
   let hit = null;
   let freshUrls = [];
+  // 确认阶段：提示词发了但还没回「确认」时，8 秒一查，尽快把确认发出去
+  while (confirmTries < 2 && Date.now() < deadline) {
+    await page.waitForTimeout(8000);
+    await scrollToLatest();
+    const c = await tryConfirmVideoParams();
+    if (c === "none") break;            // 没有确认卡，直接进入生成阶段
+    confirmState = c;
+    confirmTries++;
+    if (c.indexOf("sent") === 0) break; // 确认已发出
+  }
+
+  // 生成阶段：交给浏览器内部轮询（1.5 秒一次），持续盯着页面，不用 Node 反复收发
   let coverClicked = false;
   while (Date.now() < deadline) {
+    let st = "";
     try {
-      // 确认阶段（还没回「确认」）8 秒一查，尽快把确认发出去；
-      // 进入生成阶段后 3 分钟一查，省开销，代价是出片后最多多等 3 分钟。
-      const stepMs = confirmTries > 0 ? 180000 : 8000;
-      await page.waitForTimeout(stepMs);
-      await scrollToLatest();
-      // 参数确认卡可能晚几秒才出现，没点中就再试
-      if (confirmTries < 2) {
-        const c = await tryConfirmVideoParams();
-        if (c !== "none") { confirmState = c; confirmTries++; }
-      }
-      // 豆包生成完是用一张封面图（img[class*=cover-]）展示的，页面上没有 <video>。
-      // 必须点一下封面，播放器才会创建 <video> 元素，才能拿到真实 mp4 地址。
-      if (!coverClicked) {
-        const ready = await page.evaluate(() =>
-          /视频.{0,4}生成好了|视频已生成|生成完成|视频生成完成/.test((document.body.innerText || "").slice(-2000))
-        );
-        if (ready) {
-          // 优先走无水印：hook 抓到的 fallback_api + 页面内 AES 解密
-          const wm = await resolveUnwatermarked();
-          if (wm) {
-            hit = wm;
-            wmState = "ok";
-            coverClicked = true;
-            break;
-          }
-          wmState = "empty";
-          // 退路：点封面，拿页面上那个带水印的播放地址
-          const ok = await page.evaluate(() => {
-            const c = document.querySelector("img[class*=cover-]");
-            if (!c) return false;
-            (c.closest("[class*=video]") || c).click();
-            c.click();
-            return true;
-          });
-          if (ok) {
-            coverClicked = true;
-            coverState = "clicked";
-            await page.waitForTimeout(1800);
-          }
-        }
-      }
-      // 豆包明确报错就别死等了：提前失败并把页面原文带回去
-      if (!coverClicked) {
-        const badge = await page.evaluate(() => {
-          const t = (document.body.innerText || "").slice(-1600);
-          const m = t.match(/(生成失败|提交失败|无法生成|内容不合规|违反了|生成已取消|请重新生成|额度不足|积分不足)/);
-          return m ? m[0] : "";
-        });
-        if (badge) {
-          failState = "ban:" + badge;
-          emit({
-            ok: false,
-            error: "豆包提示「" + badge + "」，可能内容不合规或额度不足",
-            mode: mode,
-            convUrl: convUrl,
-            params: params,
-            confirm: confirmState,
-            cover: coverState,
-            pause: pauseState,
-            wm: wmState,
-          });
-          return;
-        }
-      }
-      const list = await videoUrls();
-      const fresh = list.filter((s) => !before[s]);
-      if (fresh.length) {
-        hit = fresh[fresh.length - 1];
-        freshUrls = fresh;
-        break;
-      }
+      const h = await page.waitForFunction(
+        () => {
+          const t = document.body.innerText || "";
+          if (/生成失败|内容不合规|无法生成|生成已取消|额度不足|积分不足|违反了/.test(t)) return "fail";
+          if (/视频.{0,4}生成好了|视频已生成|生成完成/.test(t)) return "ready";
+          return false;
+        },
+        null,
+        { timeout: Math.min(Math.max(deadline - Date.now(), 10000), 900000), polling: 1500 }
+      );
+      st = h && typeof h.jsonValue === "function" ? await h.jsonValue() : h;
     } catch (e) {
       const msg = String((e && e.message) || e);
-      // 中途被人工接管时自动化会被暂停。先等用户交还（最多 3 分钟），
-      // 交还了就继续等视频；一直不交还再强制接管。
       if (/with the user|handOff|stopForUserControl/i.test(msg)) {
+        // 被人工接管：等交还（最多 3 分钟），交还后继续盯
         pauseState = "control-wait";
         let back = false;
         try {
@@ -1166,12 +1117,68 @@ async function main() {
           try { await takeOverTaskSpace(task.spaceId); } catch (e3) {}
         }
         pauseState = back ? "control-resumed" : "control-forced";
-        await page.waitForTimeout(1200);
         continue;
       }
-      throw e;
+      break;
+    }
+
+    if (st === "fail") {
+      const badge = await page.evaluate(() => {
+        const t = (document.body.innerText || "").slice(-1600);
+        const m = t.match(/(生成失败|内容不合规|无法生成|生成已取消|额度不足|积分不足|违反了)/);
+        return m ? m[0] : "未知";
+      });
+      emit({
+        ok: false,
+        error: "豆包提示「" + badge + "」，可能内容不合规或额度不足",
+        mode: mode,
+        convUrl: convUrl,
+        params: params,
+        confirm: confirmState,
+        cover: coverState,
+        pause: pauseState,
+        wm: wmState,
+      });
+      return;
+    }
+
+    if (st === "ready") {
+      await scrollToLatest();
+      // 先试无水印原始接口
+      if (!wmState) {
+        const wm = await resolveUnwatermarked();
+        if (wm) {
+          hit = wm;
+          wmState = "ok";
+          coverClicked = true;
+          break;
+        }
+        wmState = "empty";
+      }
+      // 退路：点封面让 <video> 出现，取带水印的播放地址
+      if (!coverClicked) {
+        const ok = await page.evaluate(() => {
+          const c = document.querySelector("img[class*=cover-]");
+          if (!c) return false;
+          (c.closest("[class*=video]") || c).click();
+          c.click();
+          return true;
+        });
+        if (ok) {
+          coverClicked = true;
+          coverState = "clicked";
+          await page.waitForTimeout(1800);
+        }
+      }
+      const list = await videoUrls();
+      const fresh = list.filter((s) => !before[s]);
+      if (fresh.length) {
+        hit = fresh[fresh.length - 1];
+        break;
+      }
     }
   }
+
 
   const tail = await page.evaluate(() => (document.body.innerText || "").slice(-400));
   if (!hit) {
