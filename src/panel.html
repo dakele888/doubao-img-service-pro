@@ -191,6 +191,23 @@ button.danger:hover{background:#fdf1f0}
 </div>
 </div>
 
+<div class="modal" id="rawModal">
+  <div class="modal-box" style="max-width:860px">
+    <div class="modal-head">
+      <span>队列原始数据（按任务区分）</span>
+      <button class="mclose" onclick="closeRawQueue()">×</button>
+    </div>
+    <div class="modal-body">
+      <div style="margin-bottom:8px;display:flex;gap:8px">
+        <button class="pill" onclick="openRawQueue()">↻ 重新读取</button>
+        <button class="pill" onclick="copyRaw()">复制全部</button>
+        <span id="rawCount" style="font-size:12px;color:#7b8a82;align-self:center"></span>
+      </div>
+      <pre id="rawBody" style="font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;margin:0;background:#f7faf8;border:1px solid #e8efea;border-radius:8px;padding:10px;max-height:62vh;overflow:auto"></pre>
+    </div>
+  </div>
+</div>
+
 <div id="viewVideo" style="display:none">
   <div class="topbar">
     <button class="help-btn" onclick="closeVideoView()" style="font-weight:600">← 返回</button>
@@ -245,6 +262,7 @@ button.danger:hover{background:#fdf1f0}
     <div class="card">
       <div class="card-h2">
         <h2>任务队列 <span class="stat" id="vidTaskStat"></span></h2>
+        <button class="pill" onclick="openRawQueue()">原始数据</button>
         <button class="pill" onclick="refreshVidTasks()">↻ 刷新</button>
       </div>
       <div id="vidTaskList"></div>
@@ -646,6 +664,28 @@ function closeVideoView(){
   $('viewVideo').style.display='none';
   $('viewMain').style.display='';
   window.scrollTo(0,0);
+}
+function openRawQueue(){
+  api('/api/video/queue/raw').then(function(d){
+    var items=d.items||[];
+    var body=$('rawBody');
+    if(!body) return;
+    if(!items.length){
+      body.textContent='(队列为空)';
+    }else{
+      body.textContent=items.map(function(j,i){
+        return '════════ 任务 '+(i+1)+'/'+items.length+'  '+j.id+'  ['+j.status+'] ════════\n'
+          + JSON.stringify(j,null,2);
+      }).join('\n\n');
+    }
+    if($('rawCount')) $('rawCount').textContent='共 '+(d.count||items.length)+' 个任务';
+    $('rawModal').classList.add('on');
+  }).catch(function(){ toast('读取队列失败'); });
+}
+function closeRawQueue(){ var m=$('rawModal'); if(m) m.classList.remove('on'); }
+function copyRaw(){
+  var t=($('rawBody')&&$('rawBody').textContent)||'';
+  if(navigator.clipboard) navigator.clipboard.writeText(t).then(function(){toast('已复制')}).catch(function(){toast('复制失败')});
 }
 function refreshVidTasks(){
   api('/api/video/queue').then(function(d){

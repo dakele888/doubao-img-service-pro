@@ -721,6 +721,15 @@ fn route(stream: &mut TcpStream, req: Req) {
         return json_resp(stream, 200, &json!({ "ok": false, "error": "密码不对" }));
     }
 
+    // 队列原始数据：每个任务的完整 JSON（含全文 prompt、url、error），给排查用
+    if m == "GET" && p == "/api/video/queue/raw" {
+        let g = video_jobs().lock().unwrap_or_else(|e| e.into_inner());
+        let items: Vec<Value> = g.iter().map(|j| j.to_json()).collect();
+        let count = items.len();
+        drop(g);
+        return json_resp(stream, 200, &json!({ "count": count, "items": items }));
+    }
+
     // 视频任务队列：面板上要能看到「排队 / 生成中 / 完成 / 失败」，和生图那个队列一样
     if m == "GET" && p == "/api/video/queue" {
         let g = video_jobs().lock().unwrap_or_else(|e| e.into_inner());
