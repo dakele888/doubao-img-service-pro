@@ -194,7 +194,7 @@ button.danger:hover{background:#fdf1f0}
 <div class="modal" id="rawModal">
   <div class="modal-box" style="max-width:860px">
     <div class="modal-head">
-      <span>队列原始数据（按任务区分）</span>
+      <span id="rawTitle">队列原始数据</span>
       <button class="mclose" onclick="closeRawQueue()">×</button>
     </div>
     <div class="modal-body">
@@ -676,22 +676,39 @@ function closeVideoView(){
   $('viewMain').style.display='';
   window.scrollTo(0,0);
 }
-function openRawQueue(){
-  api('/api/video/queue/raw').then(function(d){
-    var items=d.items||[];
+var rawCurId='';
+// 不传 id 时沿用当前查看的任务；rawCurId 为空则显示全部
+function openRawQueue(id){
+  if(id!==undefined) rawCurId=id||'';
+  var use=rawCurId;
+  var url='/api/video/queue/raw'+(use?('?id='+encodeURIComponent(use)):'');
+  api(url).then(function(d){
     var body=$('rawBody');
     if(!body) return;
-    if(!items.length){
-      body.textContent='(队列为空)';
+    var title=$('rawTitle'), cnt=$('rawCount');
+    if(use){
+      body.textContent=JSON.stringify(d,null,2);
+      var rc=(d.references&&d.references.length)||0;
+      var refNames=(d.references||[]).map(function(r){return r.name+' ('+fmt(r.bytes)+')'}).join('、');
+      if(title) title.textContent='任务原始数据 · '+use;
+      if(cnt) cnt.textContent='参考图 '+rc+' 张'+(refNames?('：'+refNames):'')+' · 状态 '+(d.status||'?');
     }else{
-      body.textContent=items.map(function(j,i){
+      var items=d.items||[];
+      body.textContent=items.length?items.map(function(j,i){
         return '════════ 任务 '+(i+1)+'/'+items.length+'  '+j.id+'  ['+j.status+'] ════════\n'
           + JSON.stringify(j,null,2);
-      }).join('\n\n');
+      }).join('\n\n'):'(队列为空)';
+      if(title) title.textContent='队列原始数据（全部）';
+      if(cnt) cnt.textContent='共 '+(d.count||items.length)+' 个任务';
     }
-    if($('rawCount')) $('rawCount').textContent='共 '+(d.count||items.length)+' 个任务';
     $('rawModal').classList.add('on');
-  }).catch(function(){ toast('读取队列失败'); });
+  }).catch(function(){ toast(use?'读取任务失败':'读取队列失败'); });
+}
+function delVidTask(id){
+  if(!confirm('从队列移除这个任务？\n\n如果它正在生成，后台仍会跑完，但结果会被丢弃。')) return;
+  api('/v1/videos/'+encodeURIComponent(id),{method:'DELETE'}).then(function(){
+    toast('已移除'); if(rawCurId===id) rawCurId=''; refreshVidTasks();
+  }).catch(function(){ toast('移除失败'); });
 }
 function closeRawQueue(){ var m=$('rawModal'); if(m) m.classList.remove('on'); }
 function copyRaw(){
@@ -714,11 +731,16 @@ function refreshVidTasks(){
       var elTxt = el >= 60 ? (Math.floor(el/60)+'m'+(el%60)+'s') : (el+'s');
       var elColor = el > 900 ? '#b4453a' : (el > 300 ? '#9a6b1f' : '#7b8a82');
       var elBold = el > 300 ? 'font-weight:600' : '';
+      var refTxt = j.ref_count ? (' · 参考图 '+j.ref_count+' 张') : '';
       return '<div class="kv" style="flex-direction:column;align-items:flex-start;gap:2px">'
-        + '<div>'+t+' · 时长 '+(j.seconds||'?')+'s · 比例 '+esc(j.size||'-')
+        + '<div>'+t+' · 时长 '+(j.seconds||'?')+'s · 比例 '+esc(j.size||'-')+refTxt
         + ' · <span style="color:'+elColor+';'+elBold+'">已等 '+elTxt+'</span></div>'
         + '<div style="color:#7b8a82;font-size:12px">'+esc(String(j.prompt||'').replace(/\n/g,' ').slice(0,80))+'</div>'
-        + err + '</div>';
+        + err
+        + '<div style="display:flex;gap:6px;margin-top:4px">'
+        + '<button class="pill" onclick="openRawQueue(\''+j.id+'\')">原始数据</button>'
+        + '<button class="pill" onclick="delVidTask(\''+j.id+'\')" title="从队列移除">× 移除</button>'
+        + '</div></div>';
     }).join('');
     var emp=$('vidTaskEmpty');
     if(emp) emp.style.display=items.length?'none':'block';

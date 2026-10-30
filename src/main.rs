@@ -733,9 +733,28 @@ fn route(stream: &mut TcpStream, req: Req) {
         return json_resp(stream, 200, &json!({ "ok": false, "error": "密码不对" }));
     }
 
-    // 队列原始数据：每个任务的完整 JSON（含全文 prompt、url、error），给排查用
+    // 队列原始数据：?id=video_xxx 返回单个任务的完整 JSON（含完整提示词、参考图清单）；
+    // 不带 id 时返回全部，兼容旧调用。
     if m == "GET" && p == "/api/video/queue/raw" {
+        let want = req
+            .query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("id="))
+            .map(|x| x.trim().to_string())
+            .unwrap_or_default();
         let g = video_jobs().lock().unwrap_or_else(|e| e.into_inner());
+        if !want.is_empty() {
+            let hit = g.iter().find(|j| j.id == want).map(|j| j.to_json());
+            drop(g);
+            return match hit {
+                Some(v) => json_resp(stream, 200, &v),
+                None => json_resp(
+                    stream,
+                    404,
+                    &json!({ "error": { "message": format!("没有这个任务：{}", want), "code": "NOT_FOUND" } }),
+                ),
+            };
+        }
         let items: Vec<Value> = g.iter().map(|j| j.to_json()).collect();
         let count = items.len();
         drop(g);
@@ -758,6 +777,8 @@ fn route(stream: &mut TcpStream, req: Req) {
                     "seconds": j.seconds,
                     "size": j.size,
                     "prompt": j.prompt.chars().take(60).collect::<String>(),
+                    "ref_count": j.refs.len(),
+                    "ref_names": j.refs.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
                     "elapsed": (now - j.created_at).max(0),
                     "error": j.error,
                 })
@@ -1092,6 +1113,13 @@ fn prompt_with_params(prompt: &str, aspect: &str, dur: &str, res: &str, model: &
 // DELETE /v1/videos/{id}         删除任务记录
 
 #[derive(Clone)]
+struct RefInfo {
+    name: String,
+    mime: String,
+    bytes: usize,
+}
+
+#[derive(Clone)]
 struct VideoJob {
     id: String,
     created_at: i64,
@@ -1101,8 +1129,34 @@ struct VideoJob {
     size: String,
     model: String,
     prompt: String,
+    /// 实际发给豆包的完整提示词（含画面参数段）
+    full_prompt: String,
     url: String,
     error: Option<String>,
+    /// 参考图元信息（文件名/类型/字节数），用于面板展示与排查
+    refs: Vec<RefInfo>,
+    /// 去重指纹：prompt + 参考图内容
+    fingerprint: String,
+    cancelled: bool,
+}
+
+/// 去重指纹：prompt + 每张参考图的名字/类型/长度/首尾片段。
+/// 不用 md5 是为了不新增依赖；图片首尾各取 128 字符足够区分，
+/// 同时避免对大 base64 串做全量哈希（4MB 图片会明显拖慢建任务）。
+fn fingerprint_of(prompt: &str, refs: &[ego::RefImage]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    prompt.hash(&mut h);
+    for (name, mime, b64) in refs {
+        name.hash(&mut h);
+        mime.hash(&mut h);
+        b64.len().hash(&mut h);
+        let head: String = b64.chars().take(128).collect();
+        head.hash(&mut h);
+        let tail: String = b64.chars().rev().take(128).collect();
+        tail.hash(&mut h);
+    }
+    format!("{:016x}", h.finish())
 }
 
 impl VideoJob {
@@ -1117,6 +1171,15 @@ impl VideoJob {
             "size": self.size,
             "model": self.model,
             "prompt": self.prompt,
+            "full_prompt": self.full_prompt,
+            "ref_count": self.refs.len(),
+            "references": self.refs.iter().map(|r| json!({
+                "name": r.name,
+                "mime": r.mime,
+                "bytes": r.bytes,
+            })).collect::<Vec<_>>(),
+            "fingerprint": self.fingerprint,
+            "cancelled": self.cancelled,
             "url": self.url,
             "error": self.error,
             // OpenAI 视频对象规范里的字段，即使没有也补上，保证结构完整
@@ -1211,6 +1274,35 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
     };
     // 画面参数垫在提示词前面（豆包网页没有可靠的比例/时长控件）
     let full_prompt = prompt_with_params(&prompt, &aspect, &seconds, &resolution, &model);
+    // 参考图元信息：面板要能看到「这张图叫什么、多大」，不再只有一句「N 张」
+    let refs_info: Vec<RefInfo> = refs
+        .iter()
+        .map(|(n, m, b)| RefInfo {
+            name: n.clone(),
+            mime: m.clone(),
+            // base64 长度换算回原始字节数（4 字符 → 3 字节）
+            bytes: b.len() * 3 / 4,
+        })
+        .collect();
+    let fingerprint = fingerprint_of(&prompt, &refs);
+
+    // 去重：只要 prompt 与参考图 100% 相同（指纹一致），且旧任务还在排队/运行且未被取消，
+    // 新请求直接复用旧任务、不新建，避免用户因「没反馈」重复点击堆出多个 30 分钟任务。
+    {
+        let g = video_jobs().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old) = g.iter().find(|j| {
+            j.fingerprint == fingerprint
+                && !j.cancelled
+                && (j.status == "queued" || j.status == "in_progress")
+        }) {
+            let v = old.to_json();
+            let oid = old.id.clone();
+            drop(g);
+            util::log(&format!("[视频] 去重：与 {} 完全相同，复用已有任务，不新建", oid));
+            return json_resp(stream, 200, &v);
+        }
+    }
+
     let seq = VIDEO_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = format!("video_{}_{}", util::now_ms(), seq);
     let job = VideoJob {
@@ -1222,8 +1314,12 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
         size,
         model,
         prompt: prompt.clone(),
+        full_prompt: full_prompt.clone(),
         url: String::new(),
         error: None,
+        refs: refs_info,
+        fingerprint,
+        cancelled: false,
     };
     if let Ok(mut g) = video_jobs().lock() {
         // 只留最近 50 个，避免内存无限涨
