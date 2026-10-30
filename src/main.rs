@@ -47,7 +47,9 @@ pub fn port() -> u16 {
 const HOST: &str = "127.0.0.1";
 const GEN_TIMEOUT_MS: u64 = 240_000;
 /// 视频生成比图片慢很多，给足时间（10 分钟）
-const VIDEO_TIMEOUT_MS: u64 = 600_000;
+// 视频生成很慢：10 秒 + 多张参考图实测超过 10 分钟。给到 30 分钟，
+// 脚本内部再用 timeout-60s 作为等待截止，留 1 分钟收尾。
+const VIDEO_TIMEOUT_MS: u64 = 1_800_000;
 /// 面板里进入「视频中转」的密码
 const VIDEO_PASSWORD: &str = "12345678";
 /// 视频解锁状态（进程内，重启后需重输）
