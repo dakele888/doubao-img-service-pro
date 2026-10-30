@@ -167,14 +167,25 @@ pub fn download(url: &str, dest: &Path) -> Result<u64, String> {
     }
     let d = dest.to_string_lossy().to_string();
 
-    let ok = Command::new("curl")
+    // 用 output 而不是 status：curl 的 stderr 要留下来，不然失败只报「下载失败」，没法定位
+    let mut detail = String::new();
+    match Command::new("curl")
         .args(["-sS", "-L", "--max-time", "120", "--retry", "2", "-o", &d, url])
         .creation_flags(CREATE_NO_WINDOW)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+        .output()
+    {
+        Ok(o) => {
+            if !o.status.success() {
+                let e = String::from_utf8_lossy(&o.stderr);
+                detail = format!("curl 退出码 {:?}：{}", o.status.code(), e.chars().take(200).collect::<String>());
+            } else if !dest.exists() {
+                detail = "curl 返回成功但文件没落地".into();
+            }
+        }
+        Err(e) => detail = format!("curl 启动失败：{}", e),
+    }
 
-    if !ok || !dest.exists() {
+    if !detail.is_empty() || !dest.exists() {
         let ps = format!(
             "try{{Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing}}catch{{exit 1}}",
             url.replace('\'', "''"),
@@ -187,7 +198,11 @@ pub fn download(url: &str, dest: &Path) -> Result<u64, String> {
     }
     match fs::metadata(dest) {
         Ok(m) if m.len() > 0 => Ok(m.len()),
-        _ => Err("下载失败".into()),
+        _ => Err(if detail.is_empty() {
+            "下载失败".to_string()
+        } else {
+            format!("下载失败（{}）", detail)
+        }),
     }
 }
 

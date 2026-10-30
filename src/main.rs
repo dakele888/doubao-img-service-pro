@@ -1530,7 +1530,7 @@ fn produce_video(prompt: &str, refs: &[ego::RefImage], job_id: &str) -> Result<P
     if let Some(urls) = v.get("urls").and_then(|x| x.as_array()) {
         for u in urls {
             if let Some(s) = u.as_str() {
-                let short: String = s.chars().take(220).collect();
+                let short: String = s.chars().take(600).collect();
                 util::log(&format!("[视频] 抓到地址：{}", short));
             }
         }
@@ -1550,7 +1550,21 @@ fn produce_video(prompt: &str, refs: &[ego::RefImage], job_id: &str) -> Result<P
     // 用任务 id 命名（video_xxx.mp4）：文件落在磁盘上，服务重启后内存任务没了也能靠文件回答查询
     let name = if job_id.is_empty() { util::md5_name_ext(&url, "mp4") } else { format!("{}.mp4", job_id) };
     let file = od.join(&name);
-    match util::download(&url, &file) {
+    // 升级档位（ori/raw）是改 URL 参数拼出来的，豆包现在对完整 URL 签名，
+    // 改了参数签名就失效，下载会 403。所以失败时回退到页面里那个原始地址（带水印但能下）。
+    let thumb = v.get("thumbUrl").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let dl = match util::download(&url, &file) {
+        Ok(b) => Ok(b),
+        Err(e) => {
+            if !thumb.is_empty() && thumb != url {
+                util::log(&format!("[生图] 升级地址下载失败（{}），回退页面原始地址重试", e));
+                util::download(&thumb, &file).map_err(|e2| format!("{}；回退也失败：{}", e, e2))
+            } else {
+                Err(e)
+            }
+        }
+    };
+    match dl {
         Ok(bytes) => {
             util::auto_clean(&od, &cfg);
             Ok(Produced { direct: false, src_url: url, name, bytes, file })
@@ -1643,7 +1657,7 @@ fn produce_image(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failu
     if let Some(urls) = v.get("urls").and_then(|x| x.as_array()) {
         for u in urls {
             if let Some(s) = u.as_str() {
-                let short: String = s.chars().take(220).collect();
+                let short: String = s.chars().take(600).collect();
                 util::log(&format!("[抓图] {}", short));
             }
         }
