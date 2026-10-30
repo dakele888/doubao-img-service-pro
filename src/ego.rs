@@ -1080,7 +1080,7 @@ async function main() {
   let coverClicked = false;
   while (Date.now() < deadline) {
     try {
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(8000);
       await scrollToLatest();
       // 参数确认卡可能晚几秒才出现，没点中就再试
       if (confirmTries < 2) {
