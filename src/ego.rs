@@ -1183,14 +1183,14 @@ async function main() {
       await page.waitForFunction(
         () => {
           const t = document.body.innerText || "";
-          return /视频.{0,4}生成好了|视频已生成|生成完成|生成失败|内容不合规|无法生成|生成已取消|额度不足|积分不足|违反了/.test(t);
+          return /视频.{0,4}生成好了|视频已生成|生成完成|生成失败|内容不合规|无法生成|生成已取消|额度不足|积分不足|违反了|免费.{0,6}套餐|不可用于创作|升级正式订阅|畅享创作|会员已过期|套餐已过期/.test(t);
         },
         null,
         { timeout: Math.min(Math.max(deadline - Date.now(), 10000), 900000), polling: 1500 }
       );
       st = await page.evaluate(() => {
         const t = document.body.innerText || "";
-        if (/生成失败|内容不合规|无法生成|生成已取消|额度不足|积分不足|违反了/.test(t)) return "fail";
+        if (/生成失败|内容不合规|无法生成|生成已取消|额度不足|积分不足|违反了|免费.{0,6}套餐|不可用于创作|升级正式订阅|畅享创作|会员已过期|套餐已过期/.test(t)) return "fail";
         if (/视频.{0,4}生成好了|视频已生成|生成完成/.test(t)) return "ready";
         return "unknown";
       });
@@ -1216,12 +1216,14 @@ async function main() {
     if (st === "fail") {
       const badge = await page.evaluate(() => {
         const t = (document.body.innerText || "").slice(-1600);
-        const m = t.match(/(生成失败|内容不合规|无法生成|生成已取消|额度不足|积分不足|违反了)/);
+        const m = t.match(/(生成失败|内容不合规|无法生成|生成已取消|额度不足|积分不足|违反了|免费.{0,6}套餐|不可用于创作|升级正式订阅|畅享创作|会员已过期|套餐已过期)/);
         return m ? m[0] : "未知";
       });
       emit({
         ok: false,
-        error: "豆包提示「" + badge + "」，可能内容不合规或额度不足",
+        error: /套餐|订阅|会员/.test(badge)
+          ? "豆包账号当前套餐不支持生成视频（页面提示「" + badge + "」），请先在豆包网页升级订阅后重试"
+          : "豆包提示「" + badge + "」，可能内容不合规或额度不足",
         mode: mode,
         convUrl: convUrl,
         params: params,
