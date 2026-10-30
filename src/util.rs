@@ -218,19 +218,6 @@ pub fn md5_name(url: &str) -> String {
     format!("{}.{}", &hex[..16], ext)
 }
 
-/// 同 md5_name，但扩展名按 URL 推断，推断不出用 fallback（视频用 mp4）
-pub fn md5_name_ext(url: &str, fallback: &str) -> String {
-    let mut h = Md5::new();
-    h.update(url.as_bytes());
-    let hex = format!("{:x}", h.finalize());
-    let path = url.split('?').next().unwrap_or("").to_lowercase();
-    let ext = ["mp4", "webm", "mov", "png", "jpg", "jpeg", "webp"]
-        .iter()
-        .find(|e| path.ends_with(&format!(".{}", e)))
-        .map(|e| e.to_string())
-        .unwrap_or_else(|| fallback.to_string());
-    format!("{}.{}", &hex[..16], ext)
-}
 
 // ---------- ego-browser 定位 ----------
 pub fn find_ego(cfg: &Config) -> String {

@@ -32,9 +32,6 @@ button.danger:hover{background:#fdf1f0}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px;margin-top:4px}
 .ph{border:1px solid #e2e8e4;border-radius:8px;overflow:hidden;background:#fbfcfb;position:relative}
 .ph img{width:100%;height:82px;object-fit:cover;display:block;background:#eef2ef}
-.ph video{width:100%;height:82px;object-fit:cover;display:block;background:#eef2ef}
-#vidGrid{grid-template-columns:repeat(2,1fr)}
-#vidGrid .ph video{height:150px}
 .ph .m{padding:5px 7px;font-size:11px;color:#7b8a82;display:flex;justify-content:space-between;gap:4px}
 .ph .x{position:absolute;top:5px;right:5px;background:rgba(0,0,0,.55);color:#fff;border:0;border-radius:5px;width:20px;height:20px;line-height:18px;padding:0;font-size:12px;cursor:pointer}
 .empty{color:#93a099;font-size:13px;padding:10px 0}
@@ -101,7 +98,6 @@ button.danger:hover{background:#fdf1f0}
   <div class="top-actions">
     <button id="verBtn" class="pill ver" onclick="verClick()" title="点击检查更新">检查更新</button>
     <button id="pwdToggle" class="pill" onclick="togglePwd()" title="开启后每次启动都要输密码；改完下次启动生效">启动密码 · 开</button>
-    <button class="help-btn" id="vidEntry" onclick="openVideoView()">视频中转</button>
     <button class="help-btn" onclick="openEgo()">ego 官网</button>
     <button class="help-btn" onclick="openHelp()">部署帮助</button>
   </div>
@@ -208,77 +204,6 @@ button.danger:hover{background:#fdf1f0}
   </div>
 </div>
 
-<div id="viewVideo" style="display:none">
-  <div class="topbar">
-    <button class="help-btn" onclick="closeVideoView()" style="font-weight:600">← 返回</button>
-    <h1 style="margin-left:12px">视频中转</h1>
-    <div class="top-actions"><span class="pill" id="vidStat">未解锁</span></div>
-  </div>
-  <div class="sub">用网页版豆包生成视频，对外提供 OpenAI 兼容的视频接口</div>
-
-  <div class="card" id="vidLock">
-    <h2>进入密码</h2>
-    <div class="row">
-      <label>密码</label>
-      <input type="password" id="vidPw" placeholder="输入密码后进入" onkeydown="if(event.key==='Enter')unlockVideo()">
-      <button class="primary" onclick="unlockVideo()">进入</button>
-    </div>
-    <div class="hint">视频中转是增强功能，需要密码才能开启。</div>
-  </div>
-
-  <div id="vidBody" style="display:none">
-    <div class="card">
-      <h2>视频对话</h2>
-      <div class="row">
-        <label>专用对话名</label>
-        <input type="text" id="vidConv" placeholder="视频专用">
-        <button class="primary" onclick="saveVidConv()">保存</button>
-      </div>
-      <div class="hint" style="margin-bottom:8px">和生图一样：有这个名字的对话就一直复用它，没有就新建一条。图片和视频各自独立，不会混在同一个对话里。</div>
-      <div class="row">
-        <label>当前对话地址</label>
-        <input type="text" id="vidConvUrl" readonly>
-        <button onclick="resetVidConv()">解绑</button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>接口</h2>
-      <div class="row">
-        <label>接口地址</label>
-        <input type="text" id="vidUrl" readonly>
-        <button onclick="copyVid()">复制</button>
-      </div>
-      <div class="hint" style="margin-bottom:8px">和生图填同一个地址（<code>http://127.0.0.1:8788/v1</code>）。<b>不要带 /videos</b>——客户端会自己拼，带了会变成 <code>/v1/videos/generations/videos/...</code> 这种错地址。</div>
-      <div class="hint">
-        <b>① OpenAI 标准（异步任务）</b><br>
-        <code>POST /v1/videos</code> 建任务 → <code>GET /v1/videos/{id}</code> 查进度 → <code>GET /v1/videos/{id}/content</code> 下载视频<br>
-        <b>② 同步简化</b><br>
-        <code>POST /v1/videos/generations</code>，一直等到出结果再返回文件地址<br>
-        <span style="color:#7b8a82">body 都是 <code>{"prompt":"一只猫在草地上奔跑"}</code>，参考图用 <code>"images":[...]</code>，最多 9 张</span>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-h2">
-        <h2>任务队列 <span class="stat" id="vidTaskStat"></span></h2>
-        <button class="pill" onclick="openRawQueue()">原始数据</button>
-        <button class="pill" onclick="refreshVidTasks()">↻ 刷新</button>
-      </div>
-      <div id="vidTaskList"></div>
-      <div class="empty" id="vidTaskEmpty">还没有任务</div>
-    </div>
-
-    <div class="card">
-      <div class="card-h2">
-        <h2>已生成视频 <span class="stat" id="vidCount"></span></h2>
-        <button class="pill" onclick="refreshVideos()">↻ 刷新</button>
-      </div>
-      <div class="grid" id="vidGrid"></div>
-      <div class="empty" id="vidEmpty" style="display:none">还没有视频</div>
-    </div>
-  </div>
-</div>
 
 </div>
 
@@ -315,7 +240,7 @@ button.danger:hover{background:#fdf1f0}
     <table>
       <tr><td>图片地址</td><td><code>{"prompt":"改成水彩风","image":"https://x.com/a.png"}</code></td></tr>
       <tr><td>base64</td><td><code>"image":"data:image/png;base64,iVBOR..."</code>，也可以不带 <code>data:</code> 前缀</td></tr>
-      <tr><td>多张参考</td><td><code>"images":["...","..."]</code>，最多 9 张（视频中转同样支持）</td></tr>
+      <tr><td>多张参考</td><td><code>"images":["...","..."]</code>，最多 9 张</td></tr>
       <tr><td>别名</td><td><code>image_url</code> / <code>init_image</code> / <code>reference_image</code> / <code>source_image</code> 都认</td></tr>
       <tr><td>限制</td><td>单张 ≤ 8MB，只支持 PNG / JPEG / WEBP / GIF</td></tr>
     </table>
@@ -566,8 +491,6 @@ function load(){
     $('keepDays').value=d.cfg.keepDays;
     $('directMode').checked=!!d.cfg.directMode;
     $('imgTier').value=(d.cfg.imageTier==='raw'||d.cfg.imageTier==='thumb')?d.cfg.imageTier:'ori';
-    $('vidConv').value=d.cfg.videoConversationName||'视频专用';
-    videoStatus();
     applyTierHint();
     applyDirectUI();
     $('baseUrl').value=BASE+'/v1';
@@ -656,151 +579,13 @@ function reveal(){api('/api/reveal',{method:'POST'}).then(function(){toast('已�
 
 function mediaHtml(name,noCache){
   var q=noCache?'?t='+Date.now():'';
-  if(/\.(mp4|webm)$/i.test(name)){
-    return '<video src="'+BASE+'/files/'+name+q+'" muted loop preload="metadata"></video>';
-  }
   return '<img src="'+BASE+'/files/'+name+q+'" loading="lazy">';
 }
 
-// ---- 视频中转：密码解锁后显示入口 ----
-// ---- 视频中转：独立页面 ----
-function openVideoView(){
-  $('viewMain').style.display='none';
-  $('viewVideo').style.display='';
-  window.scrollTo(0,0);
-  videoStatus();
-  refreshVideos();
-}
-function closeVideoView(){
-  $('viewVideo').style.display='none';
-  $('viewMain').style.display='';
-  window.scrollTo(0,0);
-}
-function openRawQueue(){
-  api('/api/video/queue/raw').then(function(d){
-    var items=d.items||[];
-    var body=$('rawBody');
-    if(!body) return;
-    if(!items.length){
-      body.textContent='(队列为空)';
-    }else{
-      body.textContent=items.map(function(j,i){
-        return '════════ 任务 '+(i+1)+'/'+items.length+'  '+j.id+'  ['+j.status+'] ════════\n'
-          + JSON.stringify(j,null,2);
-      }).join('\n\n');
-    }
-    if($('rawCount')) $('rawCount').textContent='共 '+(d.count||items.length)+' 个任务';
-    $('rawModal').classList.add('on');
-  }).catch(function(){ toast('读取队列失败'); });
-}
-function closeRawQueue(){ var m=$('rawModal'); if(m) m.classList.remove('on'); }
-function copyRaw(){
-  var t=($('rawBody')&&$('rawBody').textContent)||'';
-  if(navigator.clipboard) navigator.clipboard.writeText(t).then(function(){toast('已复制')}).catch(function(){toast('复制失败')});
-}
-function refreshVidTasks(){
-  api('/api/video/queue').then(function(d){
-    var list=$('vidTaskList'); if(!list) return;
-    var st=$('vidTaskStat');
-    if(st) st.textContent='（生成中 '+(d.running||0)+' · 排队 '+(d.queued||0)+' · 完成 '+(d.done||0)+' · 失败 '+(d.fail||0)+'）';
-    var items=d.items||[];
-    list.innerHTML=items.map(function(j){
-      var t = j.status==='completed' ? '<b style="color:#2f7d4f">完成</b>'
-            : j.status==='failed' ? '<b style="color:#b4453a">失败</b>'
-            : j.status==='in_progress' ? '<b style="color:#9a6b1f">生成中 '+(j.progress||0)+'%</b>'
-            : '<b style="color:#4a6b8a">排队</b>';
-      var err = (j.status==='failed' && j.error) ? '<div style="color:#b4453a;font-size:12px;margin-top:2px">'+esc(String(j.error).slice(0,150))+'</div>' : '';
-      var el = j.elapsed||0;
-      var elTxt = el >= 60 ? (Math.floor(el/60)+'m'+(el%60)+'s') : (el+'s');
-      var elColor = el > 900 ? '#b4453a' : (el > 300 ? '#9a6b1f' : '#7b8a82');
-      var elBold = el > 300 ? 'font-weight:600' : '';
-      return '<div class="kv" style="flex-direction:column;align-items:flex-start;gap:2px">'
-        + '<div>'+t+' · 时长 '+(j.seconds||'?')+'s · 比例 '+esc(j.size||'-')
-        + ' · <span style="color:'+elColor+';'+elBold+'">已等 '+elTxt+'</span></div>'
-        + '<div style="color:#7b8a82;font-size:12px">'+esc(String(j.prompt||'').replace(/\n/g,' ').slice(0,80))+'</div>'
-        + err + '</div>';
-    }).join('');
-    var emp=$('vidTaskEmpty');
-    if(emp) emp.style.display=items.length?'none':'block';
-  }).catch(function(){});
-}
-function tickVidTasks(){
-  var v=$('viewVideo');
-  if(v && v.style.display!=='none') refreshVidTasks();
-  setTimeout(tickVidTasks,2000);
-}
-tickVidTasks();
-
-function refreshVideos(){
-  api('/api/images').then(function(d){
-    var list=(d.images||[]).filter(function(x){return /\.(mp4|webm)$/i.test(x.name)});
-    var g=$('vidGrid');
-    if(!g) return;
-    g.innerHTML='';
-    $('vidEmpty').style.display=list.length?'none':'block';
-    $('vidCount').textContent='（'+list.length+' 个，'+fmt(list.reduce(function(a,b){return a+b.size},0))+'）';
-    list.forEach(function(it){
-      var w=document.createElement('div');
-      w.className='ph';
-      w.innerHTML='<video src="'+BASE+'/files/'+it.name+'" controls preload="metadata"></video>'+
-        '<button class="x" title="删除">×</button>'+
-        '<div class="m"><span>'+fmt(it.size)+'</span><span>'+new Date(it.mtime).toLocaleTimeString('zh-CN',{hour12:false})+'</span></div>';
-      w.querySelector('.x').onclick=function(){ del(it.name); setTimeout(refreshVideos,400); };
-      g.appendChild(w);
-    });
-  }).catch(function(){ toast('读取视频列表失败'); });
-}
-function resetVidConv(){
-  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({videoConversationUrl:''})})
-    .then(function(){ toast('已解绑，下次重新找对话'); videoStatus(); })
-    .catch(function(){ toast('解绑失败'); });
-}
-
-function renderVideo(d){
-  var lock=$('vidLock'), body=$('vidBody'), stat=$('vidStat'), url=$('vidUrl');
-  if(!lock) return;
-  if(d && d.unlocked){
-    lock.style.display='none';
-    body.style.display='';
-    stat.textContent='已解锁';
-    if(url) url.value=d.endpoint||'';
-    if($('vidConv')) $('vidConv').value=d.conversationName||'视频专用';
-    if($('vidConvUrl')) $('vidConvUrl').value=d.conversationUrl||'';
-  }else{
-    lock.style.display='';
-    body.style.display='none';
-    stat.textContent='未解锁';
-  }
-}
-function videoStatus(){
-  api('/api/video/status').then(renderVideo).catch(function(){});
-}
-function unlockVideo(){
-  var pw=($('vidPw').value||'').trim();
-  if(!pw){ toast('请输入密码'); return; }
-  api('/api/video/unlock',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:pw})})
-    .then(function(r){
-      if(r && r.ok){ $('vidPw').value=''; toast('已进入视频中转'); videoStatus(); }
-      else toast((r&&r.error)||'密码不对');
-    }).catch(function(){ toast('请求失败'); });
-}
-function copyVid(){
-  var v=$('vidUrl').value;
-  navigator.clipboard&&navigator.clipboard.writeText(v);
-  toast('已复制 '+v);
-}
-function saveVidConv(){
-  api('/api/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({videoConversationName:$('vidConv').value.trim()})})
-    .then(function(r){
-      if(r && r.ok===false){ toast(r.error||'保存失败'); return; }
-      toast('已保存');
-    }).catch(function(){ toast('保存失败'); });
-}
 load();
 tickQueue();
 checkVer(false);
 if(location.hash==='#help')openHelp();
-if(location.hash==='#video')openVideoView();
 // 心跳：面板开着时每分钟报一次，仅用于状态显示
 (function beat(){ fetch(BASE+'/api/ping').catch(function(){}); setTimeout(beat, 60000); })();
 </script></body></html>
