@@ -1645,6 +1645,10 @@ fn produce_image(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failu
     }
     // 诊断：把页面上抓到的生成图 URL 都记下来，方便排查拿到的是不是缩略图
     util::log(&format!("[原图] 档位={}", v.get("tier").and_then(|x| x.as_str()).unwrap_or("thumb")));
+    {
+        let du: String = url.chars().take(200).collect();
+        util::log(&format!("[下载] {}", du));
+    }
     if let Some(d) = v.get("rawDbg") {
         util::log(&format!(
             "[原图] cached={} targets={} found={} err={}",

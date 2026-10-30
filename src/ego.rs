@@ -513,7 +513,9 @@ async function main() {
         }
       }
     }
-    const finalUrl = upgraded || hit;
+    // 现在的 CDN 模板（cgen_wm0）本身就是无水印，且页面 src 的签名最新。
+    // 不再优先用 fiber 里挖出来的档位（那是旧签名，容易 403），thumb 模式除外。
+    const finalUrl = (WANT_TIER === "thumb" && upgraded) ? upgraded : (hit || upgraded);
 
     const convUrl = await page.url();
     if (needRename && hit) {
@@ -531,7 +533,7 @@ async function main() {
     }
 
     if (!hit) emit({ ok: false, error: "等待超时，没抓到新生成的图片" });
-    else emit({ ok: true, url: finalUrl, thumbUrl: hit, upgraded: !!upgraded, tier: tier || "thumb", rawDbg: rawDbg, urls: freshUrls, pageLabel: page.label, convUrl: convUrl, renamed: renamed, convHit: !!convHit, refs: REFS.length });
+    else emit({ ok: true, url: finalUrl, thumbUrl: hit, finalUrl: finalUrl, upgraded: !!upgraded, tier: tier || "thumb", rawDbg: rawDbg, urls: freshUrls, pageLabel: page.label, convUrl: convUrl, renamed: renamed, convHit: !!convHit, refs: REFS.length });
   } catch (e) {
     emit({ ok: false, error: "脚本异常：" + String((e && e.message) || e) });
   }
