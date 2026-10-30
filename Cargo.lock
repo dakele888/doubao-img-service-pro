@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "doubao-img"
-version = "1.4.30"
+version = "1.4.31"
 dependencies = [
  "md-5",
  "serde_json",

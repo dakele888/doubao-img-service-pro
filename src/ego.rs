@@ -1056,6 +1056,7 @@ async function main() {
   let coverState = "";
   let pauseState = "";
   let wmState = "";
+  let failState = "";
   try {
     await page.click("css:.tiptap");
     await page.waitForTimeout(300);
@@ -1115,6 +1116,29 @@ async function main() {
             coverState = "clicked";
             await page.waitForTimeout(1800);
           }
+        }
+      }
+      // 豆包明确报错就别死等了：提前失败并把页面原文带回去
+      if (!coverClicked) {
+        const badge = await page.evaluate(() => {
+          const t = (document.body.innerText || "").slice(-1600);
+          const m = t.match(/(生成失败|提交失败|无法生成|内容不合规|违反了|生成已取消|请重新生成|额度不足|积分不足)/);
+          return m ? m[0] : "";
+        });
+        if (badge) {
+          failState = "ban:" + badge;
+          emit({
+            ok: false,
+            error: "豆包提示「" + badge + "」，可能内容不合规或额度不足",
+            mode: mode,
+            convUrl: convUrl,
+            params: params,
+            confirm: confirmState,
+            cover: coverState,
+            pause: pauseState,
+            wm: wmState,
+          });
+          return;
         }
       }
       const list = await videoUrls();

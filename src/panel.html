@@ -699,8 +699,13 @@ function refreshVidTasks(){
             : j.status==='in_progress' ? '<b style="color:#9a6b1f">生成中 '+(j.progress||0)+'%</b>'
             : '<b style="color:#4a6b8a">排队</b>';
       var err = (j.status==='failed' && j.error) ? '<div style="color:#b4453a;font-size:12px;margin-top:2px">'+esc(String(j.error).slice(0,150))+'</div>' : '';
+      var el = j.elapsed||0;
+      var elTxt = el >= 60 ? (Math.floor(el/60)+'m'+(el%60)+'s') : (el+'s');
+      var elColor = el > 900 ? '#b4453a' : (el > 300 ? '#9a6b1f' : '#7b8a82');
+      var elBold = el > 300 ? 'font-weight:600' : '';
       return '<div class="kv" style="flex-direction:column;align-items:flex-start;gap:2px">'
-        + '<div>'+t+' · 时长 '+(j.seconds||'?')+'s · 比例 '+esc(j.size||'-')+' · 已等 '+(j.elapsed||0)+'s</div>'
+        + '<div>'+t+' · 时长 '+(j.seconds||'?')+'s · 比例 '+esc(j.size||'-')
+        + ' · <span style="color:'+elColor+';'+elBold+'">已等 '+elTxt+'</span></div>'
         + '<div style="color:#7b8a82;font-size:12px">'+esc(String(j.prompt||'').replace(/\n/g,' ').slice(0,80))+'</div>'
         + err + '</div>';
     }).join('');
