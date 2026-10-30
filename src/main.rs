@@ -650,7 +650,17 @@ fn route(stream: &mut TcpStream, req: Req) {
     // 更新进度：前端覆盖层轮询这个接口
     if m == "GET" && p == "/api/update/status" {
         let s = upd_status();
-        return json_resp(stream, 200, &json!({ "ok": true, "stage": s.0, "msg": s.1 }));
+        return json_resp(
+            stream,
+            200,
+            &json!({
+                "ok": true,
+                "stage": s.0,
+                "msg": s.1,
+                "downloaded": UPD_DOWN.load(std::sync::atomic::Ordering::Relaxed),
+                "total": UPD_TOTAL.load(std::sync::atomic::Ordering::Relaxed),
+            }),
+        );
     }
 
     if m == "POST" && p == "/api/release" {
@@ -2496,7 +2506,25 @@ fn do_update(report: &dyn Fn(u8, &str)) -> Result<Value, String> {
     let tmp = dir.join("_update.exe");
 
     util::log(&format!("[更新] 下载 v{}", rel.tag));
+    // 下载前探一下总大小，并起个线程盯着临时文件增长，好让面板显示百分比
+    UPD_TOTAL.store(remote_size(&rel.url), std::sync::atomic::Ordering::Relaxed);
+    UPD_DOWN.store(0, std::sync::atomic::Ordering::Relaxed);
+    let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let sf = stop_flag.clone();
+        let t2 = tmp.clone();
+        let _ = thread::Builder::new().name("dl-watch".into()).spawn(move || {
+            while !sf.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(m) = std::fs::metadata(&t2) {
+                    UPD_DOWN.store(m.len(), std::sync::atomic::Ordering::Relaxed);
+                }
+                thread::sleep(Duration::from_millis(250));
+            }
+        });
+    }
     let size = util::download(&rel.url, &tmp).map_err(|e| format!("下载失败：{}", e))?;
+    stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    UPD_DOWN.store(size, std::sync::atomic::Ordering::Relaxed);
     report(3, &format!("下载完成（{}），正在校验…", fmt_kb(size)));
     if size < 300 * 1024 {
         let _ = std::fs::remove_file(&tmp);
@@ -2548,6 +2576,25 @@ fn fmt_kb(n: u64) -> String {
 
 // ---------- 异步更新：接口立刻返回，进度存全局，前端轮询 ----------
 static UPD_STATE: OnceLock<std::sync::Mutex<(u8, String)>> = OnceLock::new();
+/// 更新下载进度（字节）：已下载 / 总大小（0 表示未知）
+static UPD_DOWN: AtomicU64 = AtomicU64::new(0);
+static UPD_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// 用 curl 探一下附件总大小，给进度条用；拿不到就返回 0
+fn remote_size(url: &str) -> u64 {
+    let out = Command::new("curl").args(["-sIL", "--max-time", "15", url]).output();
+    if let Ok(o) = out {
+        let text = String::from_utf8_lossy(&o.stdout).to_lowercase();
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("content-length:") {
+                if let Ok(n) = v.trim().parse::<u64>() {
+                    return n;
+                }
+            }
+        }
+    }
+    0
+}
 
 fn upd_state() -> &'static std::sync::Mutex<(u8, String)> {
     UPD_STATE.get_or_init(|| std::sync::Mutex::new((0, String::new())))

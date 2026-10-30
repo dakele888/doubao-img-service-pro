@@ -490,7 +490,18 @@ function updClose(){
 }
 function pollUpd(){
   fetch(BASE+'/api/update/status').then(function(r){return r.json()}).then(function(d){
-    updStage(d.stage,d.msg);
+    // 下载阶段把字节数换算成百分比/已下载量，贴在提示后面
+    var sfx='';
+    if(d.downloaded>0){
+      var mb=(d.downloaded/1048576).toFixed(2);
+      if(d.total>0){
+        var pct=Math.min(100,Math.round(d.downloaded/d.total*100));
+        sfx=' · '+pct+'%（'+mb+' / '+(d.total/1048576).toFixed(2)+' MB）';
+      }else{
+        sfx=' · 已下载 '+mb+' MB';
+      }
+    }
+    updStage(d.stage,d.msg+sfx);
     // 旧进程退出前的最后阶段：转等新进程
     if(d.stage===5){
       clearInterval(UPD_POLL);UPD_POLL=null;
