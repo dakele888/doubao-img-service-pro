@@ -1092,17 +1092,22 @@ async function main() {
   while (Date.now() < deadline) {
     let st = "";
     try {
-      const h = await page.waitForFunction(
+      // 注意：ego 的 waitForFunction 只表示条件成立（返回 true），拿不到函数返回值，
+      // 所以这里只等「有变化」，具体是 ready 还是 fail 再单独求值判断。
+      await page.waitForFunction(
         () => {
           const t = document.body.innerText || "";
-          if (/生成失败|内容不合规|无法生成|生成已取消|额度不足|积分不足|违反了/.test(t)) return "fail";
-          if (/视频.{0,4}生成好了|视频已生成|生成完成/.test(t)) return "ready";
-          return false;
+          return /视频.{0,4}生成好了|视频已生成|生成完成|生成失败|内容不合规|无法生成|生成已取消|额度不足|积分不足|违反了/.test(t);
         },
         null,
         { timeout: Math.min(Math.max(deadline - Date.now(), 10000), 900000), polling: 1500 }
       );
-      st = h && typeof h.jsonValue === "function" ? await h.jsonValue() : h;
+      st = await page.evaluate(() => {
+        const t = document.body.innerText || "";
+        if (/生成失败|内容不合规|无法生成|生成已取消|额度不足|积分不足|违反了/.test(t)) return "fail";
+        if (/视频.{0,4}生成好了|视频已生成|生成完成/.test(t)) return "ready";
+        return "unknown";
+      });
     } catch (e) {
       const msg = String((e && e.message) || e);
       if (/with the user|handOff|stopForUserControl/i.test(msg)) {
