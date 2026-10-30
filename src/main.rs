@@ -1231,7 +1231,7 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let started = util::now_ms();
-        match produce_video(&full_prompt, &refs) {
+        match produce_video(&full_prompt, &refs, &id2) {
             Ok(res) => {
                 let cost = ((util::now_ms().saturating_sub(started)) as f64) / 1000.0;
                 util::log(&format!("[视频] 任务 {} 完成（{:.1}s）{}", id2, cost, res.name));
@@ -1257,14 +1257,42 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
 }
 
 fn video_get(stream: &mut TcpStream, id: &str) {
-    match video_job_get(id) {
-        Some(j) => json_resp(stream, 200, &j.to_json()),
-        None => json_resp(
-            stream,
-            404,
-            &json!({ "error": { "message": format!("没有这个视频任务：{}", id), "code": "NOT_FOUND" } }),
-        ),
+    if let Some(j) = video_job_get(id) {
+        return json_resp(stream, 200, &j.to_json());
     }
+    // 内存里没有（服务重启过 / 超过 50 个被淘汰），退回到磁盘找同名文件。
+    // 视频文件是用任务 id 命名的，所以只要文件还在，这个 id 就永久有效。
+    let cfg = Config::load(&config_file());
+    let f = out_dir(&cfg).join(format!("{}.mp4", id));
+    if f.is_file() {
+        let size = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(0);
+        return json_resp(
+            stream,
+            200,
+            &json!({
+                "id": id,
+                "object": "video",
+                "status": "completed",
+                "progress": 100,
+                "seconds": "",
+                "size": "",
+                "model": "",
+                "prompt": "",
+                "url": format!("http://{}:{}/files/{}.mp4", HOST, port(), id),
+                "error": null,
+                "bytes": size,
+                "completed_at": null,
+                "expires_at": null,
+                "remixed_from_video_id": null,
+                "source": "disk",
+            }),
+        );
+    }
+    json_resp(
+        stream,
+        404,
+        &json!({ "error": { "message": format!("没有这个视频任务：{}", id), "code": "NOT_FOUND" } }),
+    )
 }
 
 fn video_content(stream: &mut TcpStream, id: &str) {
@@ -1411,7 +1439,7 @@ fn generate_video(stream: &mut TcpStream, req: &Req) {
         .unwrap_or_else(|e| e.into_inner());
 
     let started = util::now_ms();
-    match produce_video(&full_prompt, &refs) {
+    match produce_video(&full_prompt, &refs, "") {
         Ok(res) => {
             let cost = ((util::now_ms().saturating_sub(started)) as f64) / 1000.0;
             util::log(&format!("[视频] 完成（{:.1}s）{} {}KB", cost, res.name, res.bytes / 1024));
@@ -1438,7 +1466,7 @@ fn generate_video(stream: &mut TcpStream, req: &Req) {
     }
 }
 
-fn produce_video(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failure> {
+fn produce_video(prompt: &str, refs: &[ego::RefImage], job_id: &str) -> Result<Produced, Failure> {
     let cfg = Config::load(&config_file());
     let bin = util::find_ego(&cfg);
 
@@ -1498,7 +1526,8 @@ fn produce_video(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failu
 
     let od = out_dir(&cfg);
     let _ = std::fs::create_dir_all(&od);
-    let name = util::md5_name_ext(&url, "mp4");
+    // 用任务 id 命名（video_xxx.mp4）：文件落在磁盘上，服务重启后内存任务没了也能靠文件回答查询
+    let name = if job_id.is_empty() { util::md5_name_ext(&url, "mp4") } else { format!("{}.mp4", job_id) };
     let file = od.join(&name);
     match util::download(&url, &file) {
         Ok(bytes) => {
