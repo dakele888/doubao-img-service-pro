@@ -1605,7 +1605,7 @@ fn produce_image(prompt: &str, refs: &[ego::RefImage]) -> Result<Produced, Failu
 
     let mut last: Option<Value> = None;
     for attempt in 1..=3 {
-        let script = ego::build_script(prompt, &cfg.page_label, &cfg.conversation_name, GEN_TIMEOUT_MS, refs, &cfg.image_tier);
+        let script = ego::build_script(prompt, &cfg.page_label, &cfg.conversation_name, &cfg.conversation_url, GEN_TIMEOUT_MS, refs, &cfg.image_tier);
         let r = ego::run(&bin, &script, Duration::from_millis(GEN_TIMEOUT_MS));
         match r {
             Ok(v) => {

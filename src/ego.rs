@@ -18,6 +18,7 @@ pub fn build_script(
     prompt: &str,
     page_label: &str,
     conv_name: &str,
+    conv_url: &str,
     gen_timeout_ms: u64,
     refs: &[RefImage],
     want_tier: &str,
@@ -25,6 +26,7 @@ pub fn build_script(
     let prompt_json = serde_json::to_string(prompt).unwrap_or_else(|_| "\"\"".into());
     let page_json = serde_json::to_string(page_label).unwrap_or_else(|_| "\"p2\"".into());
     let name_json = serde_json::to_string(conv_name).unwrap_or_else(|_| "\"生图专用\"".into());
+    let url_json = serde_json::to_string(conv_url).unwrap_or_else(|_| "\"\"".into());
     let deadline = gen_timeout_ms.saturating_sub(60_000);
 
     let refs_json = serde_json::to_string(
@@ -41,6 +43,7 @@ pub fn build_script(
         .replace("@@PROMPT@@", &prompt_json)
         .replace("@@PAGE@@", &page_json)
         .replace("@@NAME@@", &name_json)
+        .replace("@@CURL@@", &url_json)
         .replace("@@IMAGES@@", &refs_json)
         .replace("@@DEADLINE@@", &deadline.to_string())
 }
@@ -105,6 +108,7 @@ const WANT_TIER = "@@TIER@@";
 const PROMPT = @@PROMPT@@;
 const PAGE_LABEL = @@PAGE@@;
 const CONV_NAME = @@NAME@@;
+const CONV_URL = @@CURL@@;
 const REFS = @@IMAGES@@;
 
 const pages = await task.pages();
@@ -253,15 +257,34 @@ async function main() {
     });
   } catch (e) {}
   try {
-    const convs = await listConvs();
-    convHit = convs.find((c) => c.name === CONV_NAME) || null;
-    if (convHit) {
+    let located = false;
+    // 优先用配置里固定的对话地址：同名对话可能有多个，按名字找容易跑偏
+    if (CONV_URL && CONV_URL.indexOf("/chat/") > 0) {
+      const wantId = (CONV_URL.split("/chat/")[1] || "").split("?")[0].split("/")[0];
       const cur = await page.url();
-      if (cur.indexOf(convHit.id) < 0) {
-        await page.goto("https://www.doubao.com/chat/" + convHit.id, { waitUntil: "domcontentloaded" });
+      if (wantId && cur.indexOf(wantId) < 0) {
+        await page.goto(CONV_URL, { waitUntil: "domcontentloaded" });
         await page.waitForTimeout(2600);
       }
-    } else {
+      const now = await page.url();
+      if (wantId && now.indexOf(wantId) >= 0) {
+        located = true;
+        convHit = { id: wantId, name: CONV_NAME };
+      }
+    }
+    if (!located) {
+      const convs = await listConvs();
+      convHit = convs.find((c) => c.name === CONV_NAME) || null;
+      if (convHit) {
+        const cur = await page.url();
+        if (cur.indexOf(convHit.id) < 0) {
+          await page.goto("https://www.doubao.com/chat/" + convHit.id, { waitUntil: "domcontentloaded" });
+          await page.waitForTimeout(2600);
+        }
+        located = true;
+      }
+    }
+    if (!located) {
       const cur = await page.url();
       const tail = (cur.split("/chat/")[1] || "").split("?")[0].split("/")[0];
       if (tail) {
