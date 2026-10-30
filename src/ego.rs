@@ -12,7 +12,8 @@ pub const MARK: &str = "__MOHA_IMG_RESULT__";
 pub const SPACE: &str = "moha-doubao-img";
 
 /// 参考图：(文件名, MIME, base64)
-pub type RefImage = (String, String, String);
+/// base64 用 Arc 包装：生成线程与任务记录共享同一份字节，不额外复制大字符串
+pub type RefImage = (String, String, std::sync::Arc<String>);
 
 pub fn build_script(
     prompt: &str,
@@ -32,7 +33,7 @@ pub fn build_script(
     let refs_json = serde_json::to_string(
         &refs
             .iter()
-            .map(|(name, mime, data)| serde_json::json!({ "name": name, "mime": mime, "b64": data }))
+            .map(|(name, mime, data)| serde_json::json!({ "name": name, "mime": mime, "b64": data.as_str() }))
             .collect::<Vec<_>>(),
     )
     .unwrap_or_else(|_| "[]".into());
@@ -64,7 +65,7 @@ pub fn build_video_script(
     let refs_json = serde_json::to_string(
         &refs
             .iter()
-            .map(|(name, mime, data)| serde_json::json!({ "name": name, "mime": mime, "b64": data }))
+            .map(|(name, mime, data)| serde_json::json!({ "name": name, "mime": mime, "b64": data.as_str() }))
             .collect::<Vec<_>>(),
     )
     .unwrap_or_else(|_| "[]".into());

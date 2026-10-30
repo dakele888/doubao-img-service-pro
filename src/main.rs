@@ -783,12 +783,12 @@ fn route(stream: &mut TcpStream, req: Req) {
             .iter()
             .find(|j| j.id == want_id)
             .and_then(|j| j.refs.get(want_n))
-            .map(|r| (r.mime.clone(), r.b64.clone()));
+            .map(|r| (r.mime.clone(), std::sync::Arc::clone(&r.b64)));
         drop(g);
         return match hit {
             Some((mime, b64)) if !b64.is_empty() => {
                 // 按需解码：只有真的点开看图时才付出解码开销
-                let data = match b64_decode(&b64) {
+                let data = match b64_decode(b64.as_str()) {
                     Some(d) => d,
                     None => {
                         return json_resp(stream, 500, &json!({ "error": "参考图解码失败" }));
@@ -828,7 +828,9 @@ fn route(stream: &mut TcpStream, req: Req) {
                 for r in j.refs.iter_mut() {
                     if !r.b64.is_empty() {
                         freed += r.b64.len();
-                        r.b64 = String::new();
+                        // Arc 不可变：换成一个空 Arc，解除任务记录这边的引用。
+                        // 生成线程若还在用同一份数据，字节会等它结束才真正回收。
+                        r.b64 = std::sync::Arc::new(String::new());
                     }
                 }
             }
@@ -1198,7 +1200,8 @@ struct RefInfo {
     /// 参考图的原始 base64（不解码、不落盘）。
     /// 建任务时只留这份原始串，等于纯中转，不做任何额外处理；
     /// 面板点开原始数据时才按需解码、按需发字节。
-    b64: String,
+    /// 用 Arc 与生成线程共享同一份字节，不额外复制大字符串。
+    b64: std::sync::Arc<String>,
 }
 
 #[derive(Clone)]
@@ -1251,7 +1254,8 @@ fn build_refs(refs: &[ego::RefImage]) -> Vec<RefInfo> {
             mime: mime.clone(),
             // base64 长度换算回原始字节数（4 字符 → 3 字节）
             bytes: b64.len() * 3 / 4,
-            b64: b64.clone(),
+            // Arc::clone 只加引用计数，底层字节与生成线程共用同一份
+            b64: std::sync::Arc::clone(b64),
         })
         .collect()
 }
@@ -1283,7 +1287,8 @@ fn trim_refs_mem() {
             }
             if !r.b64.is_empty() {
                 used -= r.b64.len();
-                r.b64 = String::new();
+                // 换空 Arc 解除任务记录这边的引用（生成线程若还在用，数据等它结束才回收）
+                r.b64 = std::sync::Arc::new(String::new());
             }
         }
     }
@@ -2100,7 +2105,11 @@ fn finish_ref(bytes: Vec<u8>, declared: Option<String>, idx: usize) -> Result<eg
         },
     };
     let ext = mime.rsplit('/').next().unwrap_or("png").to_string();
-    Ok((format!("ref{}.{}", idx + 1, ext), mime, b64(&bytes)))
+    Ok((
+        format!("ref{}.{}", idx + 1, ext),
+        mime,
+        std::sync::Arc::new(b64(&bytes)),
+    ))
 }
 
 /// 判断一个字符串值是不是图片：data URL / 图片链接 / 长 base64
