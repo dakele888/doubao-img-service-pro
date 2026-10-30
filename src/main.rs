@@ -80,7 +80,7 @@ pub fn config_file() -> PathBuf {
 
 pub fn out_dir(cfg: &Config) -> PathBuf {
     if cfg.out_dir.trim().is_empty() {
-        base_dir().join("out")
+        PathBuf::from("F:\\魔哈工作台")
     } else {
         PathBuf::from(cfg.out_dir.trim())
     }
