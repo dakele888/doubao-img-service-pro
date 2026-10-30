@@ -474,6 +474,70 @@ async function main() {
         return res;
       }, { key: key, tier: tier, tpl: tpl });
     }
+    // 最稳的取图方式：模拟豆包自己的「保存原图」——点开预览、点保存、拦它 fetch 的地址。
+    // 这样完全沿用豆包的下载逻辑，不用猜档位、不改参数，模板换了也不受影响。
+    async function grabViaSave(keyHint) {
+      try {
+        const opened = await page.evaluate((k) => {
+          const imgs = Array.from(document.querySelectorAll("img")).filter((i) => {
+            const s2 = i.currentSrc || i.src || "";
+            return s2.indexOf(k) >= 0;
+          });
+          if (!imgs.length) return false;
+          imgs[imgs.length - 1].click();
+          return true;
+        }, keyHint);
+        if (!opened) return "";
+        await page.waitForTimeout(1600);
+        await page.evaluate(() => {
+          window.__dlUrl = "";
+          const of = window.fetch;
+          window.fetch = function (input) {
+            try {
+              const u = String(input);
+              if (u.indexOf("rc_gen_image") >= 0 && !window.__dlUrl) window.__dlUrl = u;
+            } catch (e) {}
+            return of.apply(this, arguments);
+          };
+          // 阻止 <a download> 真把文件存到本地
+          const oc = HTMLAnchorElement.prototype.click;
+          HTMLAnchorElement.prototype.click = function () {
+            try {
+              if (this.hasAttribute && this.hasAttribute("download")) return;
+            } catch (e) {}
+            return oc.apply(this, arguments);
+          };
+        });
+        await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll("button"));
+          for (const b of btns) {
+            if ((b.innerText || "").trim() === "保存" && b.getBoundingClientRect().width > 0) {
+              b.click();
+              return;
+            }
+          }
+        });
+        await page.waitForTimeout(3800);
+        const u = await page.evaluate(() => window.__dlUrl || "");
+        // 关掉预览，避免挡住后续操作
+        await page.evaluate(() => {
+          const closes = Array.from(document.querySelectorAll("button,[role=button]"));
+          for (const b of closes) {
+            const t = (b.innerText || "").trim();
+            const title = b.getAttribute("title") || b.getAttribute("aria-label") || "";
+            if ((t === "×" || t === "关闭" || title.indexOf("关闭") >= 0) && b.getBoundingClientRect().width > 0) {
+              b.click();
+              return;
+            }
+          }
+        });
+        await page.waitForTimeout(500);
+        return u;
+      } catch (e) {
+        return "";
+      }
+    }
+
     // 档位选择：thumb = 强制换成 cthumb 缩略图（列表地址有时被页面渲染成 cgen 大图）；
     // ori = 默认（同网页「下载原图」：全分辨率，带豆包AI生成水印）；raw = 无水印原图。
     // 要的档找不到就退另一档（总比缩略图强），全失败才用列表原始地址。
@@ -483,7 +547,16 @@ async function main() {
     if (hit) {
       const key = (hit.split("?")[0].split("/").pop() || "").split("~")[0];
       if (key) {
-        if (WANT_TIER === "thumb") {
+        // 先走「保存原图」拿地址（最新签名、无水印），失败再退回档位逻辑
+        if (WANT_TIER !== "thumb") {
+          const viaSave = await grabViaSave(key);
+          if (viaSave) {
+            upgraded = viaSave;
+            tier = "raw";
+            rawDbg = { via: "save-button" };
+          }
+        }
+        if (!upgraded && WANT_TIER === "thumb") {
           if (hit.indexOf("cthumb") >= 0) {
             tier = "thumb";
           } else {
@@ -491,7 +564,8 @@ async function main() {
             rawDbg = r;
             if (r && r.found) { upgraded = r.found; tier = "thumb"; }
           }
-        } else {
+        }
+        if (!upgraded && WANT_TIER !== "thumb") {
           const want = WANT_TIER === "raw" ? "raw" : "ori";
           const alt = WANT_TIER === "raw" ? "ori" : "raw";
           let r = await findTier(key, want);
@@ -515,7 +589,7 @@ async function main() {
     }
     // 现在的 CDN 模板（cgen_wm0）本身就是无水印，且页面 src 的签名最新。
     // 不再优先用 fiber 里挖出来的档位（那是旧签名，容易 403），thumb 模式除外。
-    const finalUrl = (WANT_TIER === "thumb" && upgraded) ? upgraded : (hit || upgraded);
+    const finalUrl = upgraded || hit;
 
     const convUrl = await page.url();
     if (needRename && hit) {
