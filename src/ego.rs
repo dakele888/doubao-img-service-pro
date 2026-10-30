@@ -1080,7 +1080,10 @@ async function main() {
   let coverClicked = false;
   while (Date.now() < deadline) {
     try {
-      await page.waitForTimeout(8000);
+      // 确认阶段（还没回「确认」）8 秒一查，尽快把确认发出去；
+      // 进入生成阶段后 3 分钟一查，省开销，代价是出片后最多多等 3 分钟。
+      const stepMs = confirmTries > 0 ? 180000 : 8000;
+      await page.waitForTimeout(stepMs);
       await scrollToLatest();
       // 参数确认卡可能晚几秒才出现，没点中就再试
       if (confirmTries < 2) {
