@@ -783,10 +783,17 @@ fn route(stream: &mut TcpStream, req: Req) {
             .iter()
             .find(|j| j.id == want_id)
             .and_then(|j| j.refs.get(want_n))
-            .map(|r| (r.mime.clone(), r.data.clone()));
+            .map(|r| (r.mime.clone(), r.b64.clone()));
         drop(g);
         return match hit {
-            Some((mime, data)) if !data.is_empty() => {
+            Some((mime, b64)) if !b64.is_empty() => {
+                // 按需解码：只有真的点开看图时才付出解码开销
+                let data = match b64_decode(&b64) {
+                    Some(d) => d,
+                    None => {
+                        return json_resp(stream, 500, &json!({ "error": "参考图解码失败" }));
+                    }
+                };
                 let ct = if mime.contains("jpg") || mime.contains("jpeg") {
                     "image/jpeg"
                 } else if mime.contains("webp") {
@@ -800,6 +807,36 @@ fn route(stream: &mut TcpStream, req: Req) {
             }
             _ => json_resp(stream, 404, &json!({ "error": "参考图已不在内存或不存在" })),
         };
+    }
+
+    // 释放某个任务的参考图内存：面板弹窗关闭时自动调用。
+    // 任务本身保留，元信息（名字/大小/类型）还在，只是图字节不再占内存。
+    if m == "DELETE" && p == "/api/video/refs" {
+        let want_id = req
+            .query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("id="))
+            .map(url_decode)
+            .unwrap_or_default();
+        if want_id.is_empty() {
+            return json_resp(stream, 400, &json!({ "error": "bad ref request" }));
+        }
+        let mut freed = 0usize;
+        {
+            let mut g = video_jobs().lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(j) = g.iter_mut().find(|x| x.id == want_id) {
+                for r in j.refs.iter_mut() {
+                    if !r.b64.is_empty() {
+                        freed += r.b64.len();
+                        r.b64 = String::new();
+                    }
+                }
+            }
+        }
+        if freed > 0 {
+            REFS_BYTES.fetch_sub(freed, Ordering::Relaxed);
+        }
+        return json_resp(stream, 200, &json!({ "id": want_id, "released": freed }));
     }
 
     // 视频任务队列：面板上要能看到「排队 / 生成中 / 完成 / 失败」，和生图那个队列一样
@@ -1158,9 +1195,10 @@ struct RefInfo {
     name: String,
     mime: String,
     bytes: usize,
-    /// 参考图字节（解码后）留在内存里，面板点开原始数据时才发给前端。
-    /// 内存上限内保存，超限时从最旧任务开始丢弃（丢图不删任务，元信息仍在）。
-    data: Vec<u8>,
+    /// 参考图的原始 base64（不解码、不落盘）。
+    /// 建任务时只留这份原始串，等于纯中转，不做任何额外处理；
+    /// 面板点开原始数据时才按需解码、按需发字节。
+    b64: String,
 }
 
 #[derive(Clone)]
@@ -1203,33 +1241,32 @@ fn fingerprint_of(prompt: &str, refs: &[ego::RefImage]) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// 参考图：base64 解码后留在内存里，面板「原始数据」弹窗点开时才按需取图渲染，
-/// 不点开不发请求、不占磁盘。返回带图字节的 RefInfo。
+/// 参考图：不解码、不落盘，只把请求里带来的原始 base64 留一份。
+/// 相当于纯中转，建任务阶段不做任何额外处理；
+/// 面板点开原始数据时才按需解码、按需发字节。
 fn build_refs(refs: &[ego::RefImage]) -> Vec<RefInfo> {
-    let mut out = Vec::with_capacity(refs.len());
-    for (name, mime, b64) in refs.iter() {
-        let data = b64_decode(b64).unwrap_or_default();
-        out.push(RefInfo {
+    refs.iter()
+        .map(|(name, mime, b64)| RefInfo {
             name: name.clone(),
             mime: mime.clone(),
-            bytes: if data.is_empty() { b64.len() * 3 / 4 } else { data.len() },
-            data,
-        });
-    }
-    out
+            // base64 长度换算回原始字节数（4 字符 → 3 字节）
+            bytes: b64.len() * 3 / 4,
+            b64: b64.clone(),
+        })
+        .collect()
 }
 
 /// 一个任务占用的参考图字节数
 fn refs_bytes_of(job: &VideoJob) -> usize {
-    job.refs.iter().map(|r| r.data.len()).sum()
+    job.refs.iter().map(|r| r.b64.len()).sum()
 }
 
-/// 参考图字节的内存上限，超了就从最旧任务开始丢图（任务本身保留，元信息仍在）
+/// 参考图内存上限，超了就从最旧任务开始丢图（任务本身保留，元信息仍在）
 const REFS_MEM_LIMIT: usize = 200 * 1024 * 1024;
 /// 当前留在内存里的参考图字节总数
 static REFS_BYTES: AtomicUsize = AtomicUsize::new(0);
 
-/// 内存超上限时，从最旧任务开始丢弃参考图字节
+/// 内存超上限时，从最旧任务开始丢弃参考图
 fn trim_refs_mem() {
     let mut used = REFS_BYTES.load(Ordering::Relaxed);
     if used <= REFS_MEM_LIMIT {
@@ -1244,9 +1281,9 @@ fn trim_refs_mem() {
             if used <= REFS_MEM_LIMIT {
                 break;
             }
-            if !r.data.is_empty() {
-                used -= r.data.len();
-                r.data = Vec::new();
+            if !r.b64.is_empty() {
+                used -= r.b64.len();
+                r.b64 = String::new();
             }
         }
     }
@@ -1277,7 +1314,7 @@ impl VideoJob {
                 "mime": r.mime,
                 "bytes": r.bytes,
                 // 图字节在内存里，不进 JSON；要图用 /api/video/refs?id=..&n=..
-                "has_data": !r.data.is_empty(),
+                "has_data": !r.b64.is_empty(),
             })).collect::<Vec<_>>(),
             "fingerprint": self.fingerprint,
             "cancelled": self.cancelled,
@@ -1398,7 +1435,7 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
     let id = format!("video_{}_{}", util::now_ms(), seq);
     // 参考图留在内存：面板「原始数据」弹窗点开时才按需取图渲染，不占磁盘
     let refs_info = build_refs(&refs);
-    let added: usize = refs_info.iter().map(|r| r.data.len()).sum();
+    let added: usize = refs_info.iter().map(|r| r.b64.len()).sum();
     REFS_BYTES.fetch_add(added, Ordering::Relaxed);
     let job = VideoJob {
         id: id.clone(),

@@ -712,7 +712,16 @@ function renderRawRefs(box, refs, jobId){
   if(!box) return;
   var imgs=[];
   refs.forEach(function(r,i){ if(r.has_data) imgs.push({r:r,i:i}); });
-  if(!imgs.length){ box.style.display='none'; box.innerHTML=''; return; }
+  if(!imgs.length){
+    // 有参考图但都释放了（弹窗关过），说明一下，别让人以为本来就没图
+    if(refs.length){
+      box.style.display='flex';
+      box.innerHTML='<span style="font-size:12px;color:#8a968f">参考图已释放（关闭弹窗时自动清除内存）；任务信息仍完整保留</span>';
+    }else{
+      box.style.display='none'; box.innerHTML='';
+    }
+    return;
+  }
   box.style.display='flex';
   box.innerHTML=imgs.map(function(o){
     var r=o.r;
@@ -730,7 +739,20 @@ function delVidTask(id){
     toast('已移除'); if(rawCurId===id) rawCurId=''; refreshVidTasks();
   }).catch(function(){ toast('移除失败'); });
 }
-function closeRawQueue(){ var m=$('rawModal'); if(m) m.classList.remove('on'); }
+function closeRawQueue(){
+  var m=$('rawModal'); if(!m) return;
+  m.classList.remove('on');
+  releaseRawRefs();
+}
+// 关闭弹窗时：清掉已渲染的图，并让服务端把该任务的参考图字节从内存释放掉。
+// 任务和元信息保留，下次再点开就是没有图的空状态。
+function releaseRawRefs(){
+  var box=$('rawRefs');
+  if(box){ box.innerHTML=''; box.style.display='none'; }
+  var id=rawCurId;
+  if(id) api('/api/video/refs?id='+encodeURIComponent(id),{method:'DELETE'}).catch(function(){});
+  rawCurId='';
+}
 function copyRaw(){
   var t=($('rawBody')&&$('rawBody').textContent)||'';
   if(navigator.clipboard) navigator.clipboard.writeText(t).then(function(){toast('已复制')}).catch(function(){toast('复制失败')});
