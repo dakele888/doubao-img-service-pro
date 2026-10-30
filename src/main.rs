@@ -628,7 +628,7 @@ fn route(stream: &mut TcpStream, req: Req) {
                 "checked": err.is_none(),
                 "error": err.unwrap_or_default(),
                 "downloadUrl": rel.as_ref().map(|r| r.url.clone()).unwrap_or_default(),
-                "url": "https://gitee.com/super88888/doubao-img-service/releases",
+                "url": "https://gitee.com/super88888/doubao-img-service-pro/releases",
             }),
         );
     }
@@ -652,7 +652,7 @@ fn route(stream: &mut TcpStream, req: Req) {
     }
 
     if m == "POST" && p == "/api/release" {
-        const REL: &str = "https://gitee.com/super88888/doubao-img-service/releases";
+        const REL: &str = "https://gitee.com/super88888/doubao-img-service-pro/releases";
         let ok = Command::new("cmd")
             .args(["/c", "start", "", REL])
             .spawn()
@@ -2363,7 +2363,7 @@ fn latest_release(force: bool) -> (Option<Release>, Option<String>) {
 /// Gitee 官方 API：匿名访问私有仓库会 403
 fn fetch_release_api() -> Result<Release, FetchErr> {
     let (code, body) = curl_get(
-        "https://gitee.com/api/v5/repos/super88888/doubao-img-service/releases/latest",
+        "https://gitee.com/api/v5/repos/super88888/doubao-img-service-pro/releases/latest",
         false,
     )?;
     if code == 403 || code == 404 {
@@ -2406,7 +2406,7 @@ fn fetch_release_api() -> Result<Release, FetchErr> {
 /// 下载地址按固定模式拼（附件名固定为 豆包生图服务.exe，URL 编码写死）。
 fn fetch_release_web() -> Result<Release, FetchErr> {
     let (code, loc) = curl_get(
-        "https://gitee.com/super88888/doubao-img-service/releases/latest",
+        "https://gitee.com/super88888/doubao-img-service-pro/releases/latest",
         true,
     )?;
     if code == 403 || code == 404 {
@@ -2424,7 +2424,7 @@ fn fetch_release_web() -> Result<Release, FetchErr> {
         return Err(FetchErr::Bad(format!("重定向地址异常（HTTP {}）", code)));
     }
     let url = format!(
-        "https://gitee.com/super88888/doubao-img-service/releases/download/v{}/%E8%B1%86%E5%8C%85%E7%94%9F%E5%9B%BE%E6%9C%8D%E5%8A%A1.exe",
+        "https://gitee.com/super88888/doubao-img-service-pro/releases/download/v{}/%E8%B1%86%E5%8C%85%E7%94%9F%E5%9B%BE%E6%9C%8D%E5%8A%A1.exe",
         tag
     );
     Ok(Release { tag, url })
