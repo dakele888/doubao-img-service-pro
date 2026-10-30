@@ -570,16 +570,8 @@ async function main() {
     if (hit) {
       const key = (hit.split("?")[0].split("/").pop() || "").split("~")[0];
       if (key) {
-        // 先走「保存原图」拿地址（最新签名、无水印），失败再退回档位逻辑
-        if (WANT_TIER !== "thumb") {
-          const viaSave = await grabViaSave(key);
-          if (viaSave) {
-            upgraded = viaSave;
-            tier = "raw";
-            rawDbg = { via: "save-button" };
-          }
-        }
-        if (!upgraded && WANT_TIER === "thumb") {
+        if (WANT_TIER === "thumb") {
+          // 缩略图档：保持原逻辑
           if (hit.indexOf("cthumb") >= 0) {
             tier = "thumb";
           } else {
@@ -587,31 +579,26 @@ async function main() {
             rawDbg = r;
             if (r && r.found) { upgraded = r.found; tier = "thumb"; }
           }
-        }
-        if (!upgraded && WANT_TIER !== "thumb") {
+        } else if (hit.indexOf("cthumb") >= 0) {
+          // 页面给的是缩略图，才去 fiber 里找大图
           const want = WANT_TIER === "raw" ? "raw" : "ori";
           const alt = WANT_TIER === "raw" ? "ori" : "raw";
           let r = await findTier(key, want);
           rawDbg = r;
           if (r && r.found) { upgraded = r.found; tier = want; }
-          for (let i = 0; i < 2 && !upgraded; i++) {
-            try {
-              await page.reload();
-              await page.waitForTimeout(4200);
-            } catch (e) {}
-            r = await findTier(key, want);
-            rawDbg = r;
-            if (r && r.found) { upgraded = r.found; tier = want; }
-          }
           if (!upgraded) {
             r = await findTier(key, alt);
             if (r && r.found) { upgraded = r.found; tier = alt; }
           }
+        } else {
+          // 页面 src 本身就已经是原图（cgen_wm0 = 无水印，签名有效期很长），直接用，零额外耗时
+          tier = (hit.indexOf("wm0") >= 0 || hit.indexOf("image_raw") >= 0) ? "raw" : "ori";
+          rawDbg = { via: "page-src" };
         }
       }
     }
-    // 现在的 CDN 模板（cgen_wm0）本身就是无水印，且页面 src 的签名最新。
-    // 不再优先用 fiber 里挖出来的档位（那是旧签名，容易 403），thumb 模式除外。
+
+
     const finalUrl = upgraded || hit;
 
     const convUrl = await page.url();
