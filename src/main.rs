@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::path::Path;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -761,6 +762,41 @@ fn route(stream: &mut TcpStream, req: Req) {
         return json_resp(stream, 200, &json!({ "count": count, "items": items }));
     }
 
+    // 取单张参考图：?file=refs/<任务id>/<n>_<名>.png，只在面板弹窗点开时才请求。
+    // 限定在 out/refs 下，防路径穿越。
+    if m == "GET" && p == "/api/video/refs" {
+        let f = req
+            .query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("file="))
+            .map(url_decode)
+            .unwrap_or_default();
+        // 只允许 refs/<id>/<file> 两层，且无 .. 回退
+        let bad = f.contains("..") || f.contains("\\\\");
+        let parts: Vec<&str> = f.split('/').collect();
+        if bad || parts.len() != 3 || parts[0] != "refs" || parts[1].is_empty() || parts[2].is_empty() {
+            return json_resp(stream, 400, &json!({ "error": "bad ref path" }));
+        }
+        let cfg = Config::load(&config_file());
+        let file = out_dir(&cfg).join("refs").join(parts[1]).join(parts[2]);
+        return match std::fs::read(&file) {
+            Ok(buf) => {
+                let low = parts[2].to_lowercase();
+                let ct = if low.ends_with(".png") {
+                    "image/png"
+                } else if low.ends_with(".jpg") || low.ends_with(".jpeg") {
+                    "image/jpeg"
+                } else if low.ends_with(".webp") {
+                    "image/webp"
+                } else {
+                    "application/octet-stream"
+                };
+                resp(stream, 200, ct, &buf)
+            }
+            Err(_) => json_resp(stream, 404, &json!({ "error": "not found" })),
+        };
+    }
+
     // 视频任务队列：面板上要能看到「排队 / 生成中 / 完成 / 失败」，和生图那个队列一样
     if m == "GET" && p == "/api/video/queue" {
         let g = video_jobs().lock().unwrap_or_else(|e| e.into_inner());
@@ -1117,6 +1153,8 @@ struct RefInfo {
     name: String,
     mime: String,
     bytes: usize,
+    /// 落盘后的 out_dir 相对路径（refs/<任务id>/<n>_<名>.png），空串=未落盘
+    path: String,
 }
 
 #[derive(Clone)]
@@ -1159,6 +1197,47 @@ fn fingerprint_of(prompt: &str, refs: &[ego::RefImage]) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// 参考图落盘：把每张 base64 解码写到 out/refs/<任务id>/<序号>_<资产名>.png，
+/// 返回带落盘相对路径的 RefInfo。前端「原始数据」弹窗点开时才按 path 去
+/// /api/video/refs 取图渲染，不点开不发请求。落盘失败的图 path 留空，前端不显示。
+fn save_refs(id: &str, out_root: &Path, refs: &[ego::RefImage]) -> Vec<RefInfo> {
+    let dir = out_root.join("refs").join(id);
+    let _ = std::fs::create_dir_all(&dir);
+    let mut out = Vec::with_capacity(refs.len());
+    for (i, (name, mime, b64)) in refs.iter().enumerate() {
+        let data = match b64_decode(b64) {
+            Some(d) => d,
+            None => {
+                out.push(RefInfo {
+                    name: name.clone(),
+                    mime: mime.clone(),
+                    bytes: b64.len() * 3 / 4,
+                    path: String::new(),
+                });
+                continue;
+            }
+        };
+        // 文件名净化：只去掉会破坏路径的字符，保留中文
+        let safe: String = name
+            .chars()
+            .map(|c| match c {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                c => c,
+            })
+            .collect();
+        let fname = format!("{:02}_{}.png", i, safe);
+        let rel = format!("refs/{}/{}", id, fname);
+        let ok = std::fs::write(dir.join(&fname), &data).is_ok();
+        out.push(RefInfo {
+            name: name.clone(),
+            mime: mime.clone(),
+            bytes: data.len(),
+            path: if ok { rel } else { String::new() },
+        });
+    }
+    out
+}
+
 impl VideoJob {
     fn to_json(&self) -> Value {
         json!({
@@ -1177,6 +1256,7 @@ impl VideoJob {
                 "name": r.name,
                 "mime": r.mime,
                 "bytes": r.bytes,
+                "path": r.path,
             })).collect::<Vec<_>>(),
             "fingerprint": self.fingerprint,
             "cancelled": self.cancelled,
@@ -1274,16 +1354,6 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
     };
     // 画面参数垫在提示词前面（豆包网页没有可靠的比例/时长控件）
     let full_prompt = prompt_with_params(&prompt, &aspect, &seconds, &resolution, &model);
-    // 参考图元信息：面板要能看到「这张图叫什么、多大」，不再只有一句「N 张」
-    let refs_info: Vec<RefInfo> = refs
-        .iter()
-        .map(|(n, m, b)| RefInfo {
-            name: n.clone(),
-            mime: m.clone(),
-            // base64 长度换算回原始字节数（4 字符 → 3 字节）
-            bytes: b.len() * 3 / 4,
-        })
-        .collect();
     let fingerprint = fingerprint_of(&prompt, &refs);
 
     // 去重：只要 prompt 与参考图 100% 相同（指纹一致），且旧任务还在排队/运行且未被取消，
@@ -1305,6 +1375,10 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
 
     let seq = VIDEO_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = format!("video_{}_{}", util::now_ms(), seq);
+    // 参考图落盘：面板「原始数据」弹窗点开时才按需取图渲染
+    let cfg = Config::load(&config_file());
+    let out_root = out_dir(&cfg);
+    let refs_info = save_refs(&id, &out_root, &refs);
     let job = VideoJob {
         id: id.clone(),
         created_at: (util::now_ms() / 1000) as i64,
@@ -1467,15 +1541,20 @@ fn video_delete(stream: &mut TcpStream, id: &str) {
             g.len() != before
         })
         .unwrap_or(false);
-    if removed {
-        json_resp(stream, 200, &json!({ "id": id, "object": "video.deleted", "deleted": true }))
-    } else {
-        json_resp(
+    if !removed {
+        return json_resp(
             stream,
             404,
             &json!({ "error": { "message": format!("没有这个视频任务：{}", id), "code": "NOT_FOUND" } }),
-        )
+        );
     }
+    // 移除任务时，顺手清掉落盘的参考图，防 out/refs 一直累积
+    let cfg = Config::load(&config_file());
+    let refdir = out_dir(&cfg).join("refs").join(id);
+    if refdir.is_dir() {
+        let _ = std::fs::remove_dir_all(&refdir);
+    }
+    json_resp(stream, 200, &json!({ "id": id, "object": "video.deleted", "deleted": true }))
 }
 
 /// 视频中转：接 {"prompt": "..."}（可带参考图），返回 {"data":[{"url":"..."}]}

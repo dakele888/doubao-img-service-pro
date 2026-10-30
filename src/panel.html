@@ -203,6 +203,7 @@ button.danger:hover{background:#fdf1f0}
         <button class="pill" onclick="copyRaw()">复制全部</button>
         <span id="rawCount" style="font-size:12px;color:#7b8a82;align-self:center"></span>
       </div>
+      <div id="rawRefs" style="display:none;margin-bottom:10px;flex-wrap:wrap;gap:8px"></div>
       <pre id="rawBody" style="font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;margin:0;background:#f7faf8;border:1px solid #e8efea;border-radius:8px;padding:10px;max-height:62vh;overflow:auto"></pre>
     </div>
   </div>
@@ -685,24 +686,41 @@ function openRawQueue(id){
   api(url).then(function(d){
     var body=$('rawBody');
     if(!body) return;
-    var title=$('rawTitle'), cnt=$('rawCount');
+    var title=$('rawTitle'), cnt=$('rawCount'), refsBox=$('rawRefs');
     if(use){
       body.textContent=JSON.stringify(d,null,2);
       var rc=(d.references&&d.references.length)||0;
       var refNames=(d.references||[]).map(function(r){return r.name+' ('+fmt(r.bytes)+')'}).join('、');
       if(title) title.textContent='任务原始数据 · '+use;
       if(cnt) cnt.textContent='参考图 '+rc+' 张'+(refNames?('：'+refNames):'')+' · 状态 '+(d.status||'?');
+      renderRawRefs(refsBox, d.references||[]);
     }else{
       var items=d.items||[];
       body.textContent=items.length?items.map(function(j,i){
         return '════════ 任务 '+(i+1)+'/'+items.length+'  '+j.id+'  ['+j.status+'] ════════\n'
           + JSON.stringify(j,null,2);
       }).join('\n\n'):'(队列为空)';
+      if(refsBox){ refsBox.style.display='none'; refsBox.innerHTML=''; }
       if(title) title.textContent='队列原始数据（全部）';
       if(cnt) cnt.textContent='共 '+(d.count||items.length)+' 个任务';
     }
     $('rawModal').classList.add('on');
   }).catch(function(){ toast(use?'读取任务失败':'读取队列失败'); });
+}
+// 按需渲染参考图缩略图：只有弹窗打开时才发 /api/video/refs 请求；path 为空的（落盘失败）不显示
+function renderRawRefs(box, refs){
+  if(!box) return;
+  var imgs=refs.filter(function(r){return r.path;});
+  if(!imgs.length){ box.style.display='none'; box.innerHTML=''; return; }
+  box.style.display='flex';
+  box.innerHTML=imgs.map(function(r){
+    var src='/api/video/refs?file='+encodeURIComponent(r.path);
+    var cap=r.name+' · '+fmt(r.bytes);
+    return '<div style="width:120px;background:#fff;border:1px solid #e0e8e2;border-radius:8px;overflow:hidden">'
+      +'<img loading="lazy" src="'+src+'" alt="'+cap.replace(/"/g,'&quot;')+'" style="width:120px;height:120px;object-fit:cover;display:block;background:#f2f4f3" onerror="this.parentNode.style.display=\'none\'">'
+      +'<div style="font-size:11px;color:#5c6b62;padding:4px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+cap+'</div>'
+      +'</div>';
+  }).join('');
 }
 function delVidTask(id){
   if(!confirm('从队列移除这个任务？\n\n如果它正在生成，后台仍会跑完，但结果会被丢弃。')) return;
