@@ -14,10 +14,9 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::path::Path;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
@@ -762,38 +761,44 @@ fn route(stream: &mut TcpStream, req: Req) {
         return json_resp(stream, 200, &json!({ "count": count, "items": items }));
     }
 
-    // 取单张参考图：?file=refs/<任务id>/<n>_<名>.png，只在面板弹窗点开时才请求。
-    // 限定在 out/refs 下，防路径穿越。
+    // 取单张参考图：?id=<任务id>&n=<第几张>，图字节在内存里。
+    // 只在面板弹窗点开时才请求，不点开不占带宽也不占磁盘。
     if m == "GET" && p == "/api/video/refs" {
-        let f = req
-            .query
+        let q = &req.query;
+        let want_id = q
             .split('&')
-            .find_map(|kv| kv.strip_prefix("file="))
+            .find_map(|kv| kv.strip_prefix("id="))
             .map(url_decode)
             .unwrap_or_default();
-        // 只允许 refs/<id>/<file> 两层，且无 .. 回退
-        let bad = f.contains("..") || f.contains("\\\\");
-        let parts: Vec<&str> = f.split('/').collect();
-        if bad || parts.len() != 3 || parts[0] != "refs" || parts[1].is_empty() || parts[2].is_empty() {
-            return json_resp(stream, 400, &json!({ "error": "bad ref path" }));
+        let want_n = q
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("n="))
+            .and_then(|x| x.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        if want_id.is_empty() {
+            return json_resp(stream, 400, &json!({ "error": "bad ref request" }));
         }
-        let cfg = Config::load(&config_file());
-        let file = out_dir(&cfg).join("refs").join(parts[1]).join(parts[2]);
-        return match std::fs::read(&file) {
-            Ok(buf) => {
-                let low = parts[2].to_lowercase();
-                let ct = if low.ends_with(".png") {
-                    "image/png"
-                } else if low.ends_with(".jpg") || low.ends_with(".jpeg") {
+        let g = video_jobs().lock().unwrap_or_else(|e| e.into_inner());
+        let hit = g
+            .iter()
+            .find(|j| j.id == want_id)
+            .and_then(|j| j.refs.get(want_n))
+            .map(|r| (r.mime.clone(), r.data.clone()));
+        drop(g);
+        return match hit {
+            Some((mime, data)) if !data.is_empty() => {
+                let ct = if mime.contains("jpg") || mime.contains("jpeg") {
                     "image/jpeg"
-                } else if low.ends_with(".webp") {
+                } else if mime.contains("webp") {
                     "image/webp"
+                } else if mime.contains("gif") {
+                    "image/gif"
                 } else {
-                    "application/octet-stream"
+                    "image/png"
                 };
-                resp(stream, 200, ct, &buf)
+                resp(stream, 200, ct, &data)
             }
-            Err(_) => json_resp(stream, 404, &json!({ "error": "not found" })),
+            _ => json_resp(stream, 404, &json!({ "error": "参考图已不在内存或不存在" })),
         };
     }
 
@@ -1153,8 +1158,9 @@ struct RefInfo {
     name: String,
     mime: String,
     bytes: usize,
-    /// 落盘后的 out_dir 相对路径（refs/<任务id>/<n>_<名>.png），空串=未落盘
-    path: String,
+    /// 参考图字节（解码后）留在内存里，面板点开原始数据时才发给前端。
+    /// 内存上限内保存，超限时从最旧任务开始丢弃（丢图不删任务，元信息仍在）。
+    data: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -1197,45 +1203,59 @@ fn fingerprint_of(prompt: &str, refs: &[ego::RefImage]) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// 参考图落盘：把每张 base64 解码写到 out/refs/<任务id>/<序号>_<资产名>.png，
-/// 返回带落盘相对路径的 RefInfo。前端「原始数据」弹窗点开时才按 path 去
-/// /api/video/refs 取图渲染，不点开不发请求。落盘失败的图 path 留空，前端不显示。
-fn save_refs(id: &str, out_root: &Path, refs: &[ego::RefImage]) -> Vec<RefInfo> {
-    let dir = out_root.join("refs").join(id);
-    let _ = std::fs::create_dir_all(&dir);
+/// 参考图：base64 解码后留在内存里，面板「原始数据」弹窗点开时才按需取图渲染，
+/// 不点开不发请求、不占磁盘。返回带图字节的 RefInfo。
+fn build_refs(refs: &[ego::RefImage]) -> Vec<RefInfo> {
     let mut out = Vec::with_capacity(refs.len());
-    for (i, (name, mime, b64)) in refs.iter().enumerate() {
-        let data = match b64_decode(b64) {
-            Some(d) => d,
-            None => {
-                out.push(RefInfo {
-                    name: name.clone(),
-                    mime: mime.clone(),
-                    bytes: b64.len() * 3 / 4,
-                    path: String::new(),
-                });
-                continue;
-            }
-        };
-        // 文件名净化：只去掉会破坏路径的字符，保留中文
-        let safe: String = name
-            .chars()
-            .map(|c| match c {
-                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-                c => c,
-            })
-            .collect();
-        let fname = format!("{:02}_{}.png", i, safe);
-        let rel = format!("refs/{}/{}", id, fname);
-        let ok = std::fs::write(dir.join(&fname), &data).is_ok();
+    for (name, mime, b64) in refs.iter() {
+        let data = b64_decode(b64).unwrap_or_default();
         out.push(RefInfo {
             name: name.clone(),
             mime: mime.clone(),
-            bytes: data.len(),
-            path: if ok { rel } else { String::new() },
+            bytes: if data.is_empty() { b64.len() * 3 / 4 } else { data.len() },
+            data,
         });
     }
     out
+}
+
+/// 一个任务占用的参考图字节数
+fn refs_bytes_of(job: &VideoJob) -> usize {
+    job.refs.iter().map(|r| r.data.len()).sum()
+}
+
+/// 参考图字节的内存上限，超了就从最旧任务开始丢图（任务本身保留，元信息仍在）
+const REFS_MEM_LIMIT: usize = 200 * 1024 * 1024;
+/// 当前留在内存里的参考图字节总数
+static REFS_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// 内存超上限时，从最旧任务开始丢弃参考图字节
+fn trim_refs_mem() {
+    let mut used = REFS_BYTES.load(Ordering::Relaxed);
+    if used <= REFS_MEM_LIMIT {
+        return;
+    }
+    let mut g = video_jobs().lock().unwrap_or_else(|e| e.into_inner());
+    for j in g.iter_mut() {
+        if used <= REFS_MEM_LIMIT {
+            break;
+        }
+        for r in j.refs.iter_mut() {
+            if used <= REFS_MEM_LIMIT {
+                break;
+            }
+            if !r.data.is_empty() {
+                used -= r.data.len();
+                r.data = Vec::new();
+            }
+        }
+    }
+    REFS_BYTES.store(used, Ordering::Relaxed);
+    util::log(&format!(
+        "[视频] 参考图内存超 {}MB，已释放到 {}MB",
+        REFS_MEM_LIMIT / 1024 / 1024,
+        used / 1024 / 1024
+    ));
 }
 
 impl VideoJob {
@@ -1256,7 +1276,8 @@ impl VideoJob {
                 "name": r.name,
                 "mime": r.mime,
                 "bytes": r.bytes,
-                "path": r.path,
+                // 图字节在内存里，不进 JSON；要图用 /api/video/refs?id=..&n=..
+                "has_data": !r.data.is_empty(),
             })).collect::<Vec<_>>(),
             "fingerprint": self.fingerprint,
             "cancelled": self.cancelled,
@@ -1375,10 +1396,10 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
 
     let seq = VIDEO_SEQ.fetch_add(1, Ordering::Relaxed);
     let id = format!("video_{}_{}", util::now_ms(), seq);
-    // 参考图落盘：面板「原始数据」弹窗点开时才按需取图渲染
-    let cfg = Config::load(&config_file());
-    let out_root = out_dir(&cfg);
-    let refs_info = save_refs(&id, &out_root, &refs);
+    // 参考图留在内存：面板「原始数据」弹窗点开时才按需取图渲染，不占磁盘
+    let refs_info = build_refs(&refs);
+    let added: usize = refs_info.iter().map(|r| r.data.len()).sum();
+    REFS_BYTES.fetch_add(added, Ordering::Relaxed);
     let job = VideoJob {
         id: id.clone(),
         created_at: (util::now_ms() / 1000) as i64,
@@ -1398,10 +1419,13 @@ fn video_create(stream: &mut TcpStream, req: &Req) {
     if let Ok(mut g) = video_jobs().lock() {
         // 只留最近 50 个，避免内存无限涨
         if g.len() >= 50 {
-            g.remove(0);
+            let old = g.remove(0);
+            REFS_BYTES.fetch_sub(refs_bytes_of(&old), Ordering::Relaxed);
         }
         g.push(job.clone());
     }
+    // 参考图内存超上限时，从最旧任务开始丢图
+    trim_refs_mem();
 
     util::log(&format!(
         "[视频] 建任务 {}：{}（参考图 {} 张）",
@@ -1533,11 +1557,19 @@ fn video_list(stream: &mut TcpStream) {
 }
 
 fn video_delete(stream: &mut TcpStream, id: &str) {
+    let mut freed = 0usize;
     let removed = video_jobs()
         .lock()
         .map(|mut g| {
             let before = g.len();
-            g.retain(|x| x.id != id);
+            g.retain(|x| {
+                if x.id == id {
+                    freed += refs_bytes_of(x);
+                    false
+                } else {
+                    true
+                }
+            });
             g.len() != before
         })
         .unwrap_or(false);
@@ -1548,11 +1580,8 @@ fn video_delete(stream: &mut TcpStream, id: &str) {
             &json!({ "error": { "message": format!("没有这个视频任务：{}", id), "code": "NOT_FOUND" } }),
         );
     }
-    // 移除任务时，顺手清掉落盘的参考图，防 out/refs 一直累积
-    let cfg = Config::load(&config_file());
-    let refdir = out_dir(&cfg).join("refs").join(id);
-    if refdir.is_dir() {
-        let _ = std::fs::remove_dir_all(&refdir);
+    if freed > 0 {
+        REFS_BYTES.fetch_sub(freed, Ordering::Relaxed);
     }
     json_resp(stream, 200, &json!({ "id": id, "object": "video.deleted", "deleted": true }))
 }

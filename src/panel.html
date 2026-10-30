@@ -693,7 +693,7 @@ function openRawQueue(id){
       var refNames=(d.references||[]).map(function(r){return r.name+' ('+fmt(r.bytes)+')'}).join('、');
       if(title) title.textContent='任务原始数据 · '+use;
       if(cnt) cnt.textContent='参考图 '+rc+' 张'+(refNames?('：'+refNames):'')+' · 状态 '+(d.status||'?');
-      renderRawRefs(refsBox, d.references||[]);
+      renderRawRefs(refsBox, d.references||[], use);
     }else{
       var items=d.items||[];
       body.textContent=items.length?items.map(function(j,i){
@@ -708,13 +708,15 @@ function openRawQueue(id){
   }).catch(function(){ toast(use?'读取任务失败':'读取队列失败'); });
 }
 // 按需渲染参考图缩略图：只有弹窗打开时才发 /api/video/refs 请求；path 为空的（落盘失败）不显示
-function renderRawRefs(box, refs){
+function renderRawRefs(box, refs, jobId){
   if(!box) return;
-  var imgs=refs.filter(function(r){return r.path;});
+  var imgs=[];
+  refs.forEach(function(r,i){ if(r.has_data) imgs.push({r:r,i:i}); });
   if(!imgs.length){ box.style.display='none'; box.innerHTML=''; return; }
   box.style.display='flex';
-  box.innerHTML=imgs.map(function(r){
-    var src='/api/video/refs?file='+encodeURIComponent(r.path);
+  box.innerHTML=imgs.map(function(o){
+    var r=o.r;
+    var src='/api/video/refs?id='+encodeURIComponent(jobId)+'&n='+o.i;
     var cap=r.name+' · '+fmt(r.bytes);
     return '<div style="width:120px;background:#fff;border:1px solid #e0e8e2;border-radius:8px;overflow:hidden">'
       +'<img loading="lazy" src="'+src+'" alt="'+cap.replace(/"/g,'&quot;')+'" style="width:120px;height:120px;object-fit:cover;display:block;background:#f2f4f3" onerror="this.parentNode.style.display=\'none\'">'
